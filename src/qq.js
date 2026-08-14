@@ -50,6 +50,7 @@ export class QQClient extends EventEmitter {
     this.heartbeatTimer = null;
     this.lastAckAt = 0;
     this.lastDispatchAt = Date.now(); // 业务事件最后时间 (网关假死检测)
+    this.idleReconnectBackoff = 1; // 空转退避倍率: 1,2,4,6
     this.identifySucceeded = false;
     this.botUsername = null;
     this.reconnectAttempts = 0;
@@ -262,6 +263,7 @@ export class QQClient extends EventEmitter {
 
   handleDispatch(type, data) {
     this.lastDispatchAt = Date.now();
+    this.idleReconnectBackoff = 1;
     switch (type) {
       case "READY":
         this.sessionId = data.session_id;
@@ -327,9 +329,13 @@ export class QQClient extends EventEmitter {
       }
       // 网关"假死"检测: 长时间收不到任何业务事件(DISPATCH)也强制重连。
       // 平台侧偶发"连接还在、心跳正常, 但不再推送消息"的僵尸连接。
-      if (this.lastDispatchAt && Date.now() - this.lastDispatchAt > QQ_IDLE_RECONNECT_MS) {
-        this.log.error("长时间无业务事件, 疑似网关假死, 强制重连");
+      // 阈值随连续空转退避 (10min → 20min → 40min → 60min 封顶), 避免长睡期
+      // 高频重连惹怒平台限流; 一旦收到业务事件立即恢复为最短阈值。
+      const idleThreshold = QQ_IDLE_RECONNECT_MS * this.idleReconnectBackoff;
+      if (this.lastDispatchAt && Date.now() - this.lastDispatchAt > idleThreshold) {
+        this.log.error(`长时间无业务事件(>${Math.round(idleThreshold / 60000)}min), 疑似网关假死, 强制重连`);
         this.lastDispatchAt = Date.now(); // 防止重连循环里立刻再触发
+        this.idleReconnectBackoff = Math.min(this.idleReconnectBackoff * 2, 6);
         this.ws.close(4000, "idle reconnect");
         return;
       }
