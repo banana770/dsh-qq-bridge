@@ -1,0 +1,30 @@
+{
+  "qq": {
+    "appId": "在 q.qq.com 机器人设置页复制",
+    "appSecret": "在 q.qq.com 机器人设置页复制(离开页面后不可再查看,丢失需重置)",
+    "sandbox": true,
+    "apiBase": "https://api.bot.qq.com",
+    "sandboxApiBase": "https://sandbox.api.sgroup.qq.com",
+    "authBase": "https://api.bot.qq.com/app/getAppAccessToken"
+  },
+  "dsh": {
+    "baseUrl": "http://127.0.0.1:3080",
+    "workspaceCwd": "C:\\your\\project\\dir",
+    "sessionsFile": "./sessions.json",
+    "agentPreset": "",
+    "model": {
+      "provider": "",
+      "model": "",
+      "reasoningEffort": ""
+    }
+  },
+  "bridge": {
+    "maxReplyChars": 1800,
+    "logLevel": "info",
+    "autoStart": false
+  },
+  "system": {
+    "bootAutoStart": false,
+    "keepAliveAfterClose": false
+  }
+}

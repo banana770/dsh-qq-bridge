@@ -1,0 +1,14 @@
+{
+  "name": "dsh-qq-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between DeepSeek Harness (dsh web API) and QQ official bot platform (q.qq.com)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}

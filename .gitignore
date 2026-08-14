@@ -1,0 +1,15 @@
+# 密钥与本地数据 — 绝不提交
+config.json
+sessions.json
+keep-backend.flag
+
+# 生成产物 (开机自启 VBS 启动器、日志)
+scripts/
+*.log
+
+# Node
+node_modules/
+
+# 系统
+.DS_Store
+Thumbs.db
