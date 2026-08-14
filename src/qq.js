@@ -27,9 +27,6 @@ const OP = {
   HEARTBEAT_ACK: 11,
 };
 
-// 网关"假死"检测阈值: 超过该时长收不到任何业务事件(DISPATCH)即强制重连。
-const QQ_IDLE_RECONNECT_MS = 15 * 60 * 1000;
-
 export class QQClient extends EventEmitter {
   /**
    * @param {object} cfg - { appId, appSecret, sandbox, apiBase, sandboxApiBase, authBase }
@@ -50,7 +47,7 @@ export class QQClient extends EventEmitter {
     this.heartbeatTimer = null;
     this.lastAckAt = 0;
     this.lastDispatchAt = Date.now(); // 业务事件最后时间 (网关假死检测)
-    this.idleReconnectBackoff = 1; // 空转退避倍率: 1,2,4,6
+    this.idleReconnectMin = 3; // 假死检测阈值(分钟): 活跃期 3min, 触发后逐次翻倍至 60min 封顶
     this.identifySucceeded = false;
     this.botUsername = null;
     this.reconnectAttempts = 0;
@@ -263,7 +260,7 @@ export class QQClient extends EventEmitter {
 
   handleDispatch(type, data) {
     this.lastDispatchAt = Date.now();
-    this.idleReconnectBackoff = 1;
+    this.idleReconnectMin = 3;
     switch (type) {
       case "READY":
         this.sessionId = data.session_id;
@@ -329,13 +326,14 @@ export class QQClient extends EventEmitter {
       }
       // 网关"假死"检测: 长时间收不到任何业务事件(DISPATCH)也强制重连。
       // 平台侧偶发"连接还在、心跳正常, 但不再推送消息"的僵尸连接。
-      // 阈值随连续空转退避 (10min → 20min → 40min → 60min 封顶), 避免长睡期
-      // 高频重连惹怒平台限流; 一旦收到业务事件立即恢复为最短阈值。
-      const idleThreshold = QQ_IDLE_RECONNECT_MS * this.idleReconnectBackoff;
+      // 阈值: 活跃期 3 分钟(刚聊过突然静默 ≈ 假死, 快速自愈);
+      // 触发后逐次翻倍至 60min 封顶, 避免长睡期高频重连惹怒平台限流;
+      // 收到任何业务事件立即复位为 3 分钟。
+      const idleThreshold = this.idleReconnectMin * 60 * 1000;
       if (this.lastDispatchAt && Date.now() - this.lastDispatchAt > idleThreshold) {
-        this.log.error(`长时间无业务事件(>${Math.round(idleThreshold / 60000)}min), 疑似网关假死, 强制重连`);
+        this.log.error(`无业务事件 >${this.idleReconnectMin}min, 疑似网关假死, 强制重连`);
         this.lastDispatchAt = Date.now(); // 防止重连循环里立刻再触发
-        this.idleReconnectBackoff = Math.min(this.idleReconnectBackoff * 2, 6);
+        this.idleReconnectMin = Math.min(this.idleReconnectMin * 2, 60);
         this.ws.close(4000, "idle reconnect");
         return;
       }
