@@ -27,6 +27,9 @@ const OP = {
   HEARTBEAT_ACK: 11,
 };
 
+// 网关"假死"检测阈值: 超过该时长收不到任何业务事件(DISPATCH)即强制重连。
+const QQ_IDLE_RECONNECT_MS = 15 * 60 * 1000;
+
 export class QQClient extends EventEmitter {
   /**
    * @param {object} cfg - { appId, appSecret, sandbox, apiBase, sandboxApiBase, authBase }
@@ -46,6 +49,7 @@ export class QQClient extends EventEmitter {
     this.lastSeq = null; // 最近一次 Dispatch 的 s
     this.heartbeatTimer = null;
     this.lastAckAt = 0;
+    this.lastDispatchAt = Date.now(); // 业务事件最后时间 (网关假死检测)
     this.identifySucceeded = false;
     this.botUsername = null;
     this.reconnectAttempts = 0;
@@ -257,6 +261,7 @@ export class QQClient extends EventEmitter {
   }
 
   handleDispatch(type, data) {
+    this.lastDispatchAt = Date.now();
     switch (type) {
       case "READY":
         this.sessionId = data.session_id;
@@ -318,6 +323,14 @@ export class QQClient extends EventEmitter {
       if (this.lastAckAt && Date.now() - this.lastAckAt > intervalMs * 3) {
         this.log.error("心跳 ACK 超时, 强制重连");
         this.ws.close(4000, "heartbeat timeout");
+        return;
+      }
+      // 网关"假死"检测: 长时间收不到任何业务事件(DISPATCH)也强制重连。
+      // 平台侧偶发"连接还在、心跳正常, 但不再推送消息"的僵尸连接。
+      if (this.lastDispatchAt && Date.now() - this.lastDispatchAt > QQ_IDLE_RECONNECT_MS) {
+        this.log.error("长时间无业务事件, 疑似网关假死, 强制重连");
+        this.lastDispatchAt = Date.now(); // 防止重连循环里立刻再触发
+        this.ws.close(4000, "idle reconnect");
         return;
       }
       this.ws.send(JSON.stringify({ op: OP.HEARTBEAT, d: this.lastSeq }));
