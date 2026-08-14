@@ -13,15 +13,17 @@
 // llm / agentDefaultModel 为可选 (ctx.get), 失败只降级不阻断。
 // 系统级操作 (注册表 Run 键 / 桌面保活 flag) 用 node:child_process (静态插件
 // 运行在真实 dsh node 进程内, 非动态沙箱)。
+// 系统级操作 (注册表 Run 键 / 桌面保活 flag) 用 node:child_process (静态插件
+// 运行在真实 dsh node 进程内, 非动态沙箱)。
 // BRIDGE_DIR 解析顺序: 环境变量 DSH_QQB_BRIDGE_DIR → 插件包所在位置推导
 // (link 安装时 node_modules/dsh-qq-bridge → plugin-pkg, 其上上级即项目根)。
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const name = 'dsh-qq-bridge';
-const inject = ['fs', 'subprocess', 'timer', 'webServer'];
+const inject = ['fs', 'timer', 'webServer'];
 
 /** 从插件包自身位置推导项目根: <proj>/plugin-pkg/lib/index.js → <proj>。 */
 function deriveBridgeDir() {
@@ -48,12 +50,11 @@ function apply(ctx) {
     restartCount: 0,
     userStopped: false,
     nodePath: null,
-    stdoutOffset: 0,
-    stderrOffset: 0,
     logLines: [],
     saving: false,
   };
   let disposed = false;
+  let restartTimer = null;
 
   const log = (...a) => console.log('[qqb]', ...a);
   const logErr = (...a) => console.error('[qqb]', ...a);
@@ -86,73 +87,74 @@ function apply(ctx) {
     }
     if (state.logLines.length > LOG_CAP) state.logLines.splice(0, state.logLines.length - LOG_CAP);
   }
-  function pollLogs() {
-    const h = state.proc;
-    if (!h) return;
-    try {
-      const so = h.collected && h.collected.stdout;
-      if (so) {
-        const r = so.readFrom(state.stdoutOffset);
-        if (r.lossy) pushLog('stdout', '…[较早日志已截断]');
-        pushLog('stdout', r.text);
-        state.stdoutOffset = r.nextOffset;
-      }
-    } catch (err) { /* ignore */ }
-    try {
-      const se = h.collected && h.collected.stderr;
-      if (se) {
-        const r = se.readFrom(state.stderrOffset);
-        if (r.lossy) pushLog('stderr', '…[较早日志已截断]');
-        pushLog('stderr', r.text);
-        state.stderrOffset = r.nextOffset;
-      }
-    } catch (err) { /* ignore */ }
-  }
 
   // ---------- 桥接进程 ----------
+  //
+  // 用 node:child_process 直接 spawn (而非 ctx.subprocess):
+  //   · windowsHide: true —— 不弹控制台窗口 (dsh web 若 detached 无控制台,
+  //     其子进程默认会各自创建可见控制台, 表现为"一堆终端");
+  //   · 防并发: 已在运行则直接返回; 有残留句柄先杀; 自动重启定时器单一管理,
+  //     避免多个 exit 回调/保存操作叠加出多个桥接进程 (曾导致 QQ 平台频控)。
 
   async function spawnBridge() {
     if (disposed) return;
-    if (!state.nodePath) state.nodePath = await ctx.subprocess.resolveExecutable('node');
-    const handle = ctx.subprocess.spawn({
-      argv: [state.nodePath, 'src/main.js'],
+    if (state.running && state.proc) return; // 已在运行, 防并发
+    if (state.proc) {
+      try { state.proc.kill(); } catch (err) { /* ignore */ }
+      state.proc = null;
+    }
+    const nodePath = process.execPath || 'node';
+    state.nodePath = nodePath;
+    const child = spawn(nodePath, ['src/main.js'], {
       cwd: BRIDGE_DIR,
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: 200000, spill: { maxBytes: 2000000 } },
-        stderr: { maxBytes: 200000, spill: { maxBytes: 2000000 } },
-      },
-      graceMs: 5000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    state.proc = handle;
+    child.stdout.on('data', (d) => pushLog('stdout', d.toString()));
+    child.stderr.on('data', (d) => pushLog('stderr', d.toString()));
+    state.proc = child;
     state.running = true;
     state.userStopped = false;
-    state.pid = handle.pid;
+    state.pid = child.pid;
     state.startedAt = Date.now();
     state.exitInfo = null;
-    state.stdoutOffset = 0;
-    state.stderrOffset = 0;
-    log('桥接进程已启动 pid=' + handle.pid);
-    handle.done.then((outcome) => {
+    log('桥接进程已启动 pid=' + child.pid);
+    child.on('error', (err) => {
+      logErr('桥接 spawn 错误: ' + (err && err.message));
       state.running = false;
-      state.exitInfo = { code: outcome.exitCode, signal: outcome.signal, at: Date.now() };
-      log('桥接进程退出 code=' + outcome.exitCode + ' signal=' + outcome.signal);
+      if (state.proc === child) state.proc = null;
+    });
+    child.on('exit', (code, signal) => {
+      state.running = false;
+      state.exitInfo = { code, signal, at: Date.now() };
+      log('桥接进程退出 code=' + code + ' signal=' + signal);
+      if (state.proc === child) state.proc = null;
       const auto = !disposed && !state.userStopped && state.config && state.config.bridge && state.config.bridge.autoStart;
       if (auto) {
         state.restartCount++;
         const delay = Math.min(15000, 2000 * 2 ** Math.min(state.restartCount, 4));
         log(state.restartCount + ' 次退出, ' + delay + 'ms 后自动重启');
-        ctx.timer.timeout(() => void spawnBridge().catch((e) => logErr('自动重启失败: ' + (e && e.message))), delay);
+        clearRestartTimer();
+        restartTimer = ctx.timer.timeout(() => {
+          restartTimer = null;
+          void spawnBridge().catch((e) => logErr('自动重启失败: ' + (e && e.message)));
+        }, delay);
       }
-    }).catch((err) => {
-      logErr('桥接进程异常: ' + (err && err.message));
     });
+  }
+
+  function clearRestartTimer() {
+    if (restartTimer) {
+      try { ctx.timer.clearTimeout(restartTimer); } catch (err) { /* ignore */ }
+      restartTimer = null;
+    }
   }
 
   function stopBridge() {
     state.userStopped = true;
+    clearRestartTimer();
     if (state.proc) {
-      try { state.proc.terminate(); } catch (err) { logErr('终止桥接失败: ' + (err && err.message)); }
+      try { state.proc.kill(); } catch (err) { logErr('终止桥接失败: ' + (err && err.message)); }
       state.proc = null;
     }
     state.running = false;
@@ -386,7 +388,7 @@ function apply(ctx) {
   async function writeBootLauncher() {
     const nodePath = process.execPath || 'node';
     const binPath = process.argv && process.argv[1] ? process.argv[1] : null;
-    const cwd = process.cwd();
+    const cwd = process.cwd ? process.cwd() : 'C:\\Users\\liu';
     if (!binPath) throw new Error('无法确定 dsh web 启动脚本路径 (process.argv[1])');
     const runCmd = vbsQuote(nodePath) + ' ' + vbsQuote(binPath) + ' web';
     const vbs = [
@@ -432,7 +434,6 @@ function apply(ctx) {
       ctx.webServer.register({ kind: 'exact', path: '/qqb/start', handler: handleStart }),
       ctx.webServer.register({ kind: 'exact', path: '/qqb/stop', handler: handleStop }),
     ];
-    const pollDisposer = ctx.timer.interval(() => pollLogs(), 1000);
     void (async () => {
       state.config = await readConfig();
       if (!state.config) {
@@ -447,7 +448,7 @@ function apply(ctx) {
     return () => {
       disposed = true;
       for (const d of routeDisposers) { try { d(); } catch (err) { /* ignore */ } }
-      try { pollDisposer(); } catch (err) { /* ignore */ }
+      clearRestartTimer();
       stopBridge();
     };
   });
