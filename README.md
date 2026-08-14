@@ -32,6 +32,10 @@ QQ 用户/群成员
 
 ### 1. 准备
 
+> 「127.0.0.1:3080」是 **dsh web 在你本机上的默认地址** —— 桥接与 dsh web 必须在**同一台电脑**上运行,
+> 通过 localhost 通信。每台电脑都如此, 不存在"只有某台机器能用"的限制。若你的 dsh web 端口不同,
+> 改 `config.json` 的 `dsh.baseUrl` 即可。
+
 - 已运行 `dsh web`(Web GUI,默认 `http://127.0.0.1:3080`)
 - Node.js ≥ 22:`node --version`
 - 在 [q.qq.com](https://q.qq.com/qqbot/openclaw/index.html) 创建好的机器人,拿到 **AppID** 和 **AppSecret**
