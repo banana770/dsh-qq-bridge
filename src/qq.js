@@ -241,6 +241,7 @@ export class QQClient extends EventEmitter {
         return;
       case OP.HEARTBEAT_ACK:
         this.lastAckAt = Date.now();
+        this.log.debug(`心跳 ACK (s=${msg.s ?? this.lastSeq})`);
         return;
       case OP.RECONNECT:
         this.log.warn("网关要求重连 (op7)");
@@ -261,6 +262,8 @@ export class QQClient extends EventEmitter {
   handleDispatch(type, data) {
     this.lastDispatchAt = Date.now();
     this.idleReconnectMin = 3;
+    // 诊断: 记录收到的每个业务事件类型 (debug 级)
+    this.log.debug(`收到 DISPATCH: ${type}`);
     switch (type) {
       case "READY":
         this.sessionId = data.session_id;
@@ -278,6 +281,8 @@ export class QQClient extends EventEmitter {
       default:
         // 业务事件 (C2C_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE / ...)
         if (!this.identifySucceeded && type !== "READY") return;
+        // 诊断: 打印事件数据摘要 (定位"收到但不处理"问题)
+        this.log.debug(`emit ${type} 摘要: ${JSON.stringify(data ?? {}).slice(0, 300)}`);
         this.emit("event", { type, data, seq: this.lastSeq });
     }
   }

@@ -266,25 +266,38 @@ async function main() {
       if (type === "C2C_MESSAGE_CREATE") {
         const openid = data?.author?.user_openid;
         const content = data?.content ?? "";
-        if (!openid || !content.trim()) return;
-        if (seenMsgIds.has(data.msg_id)) return;
-        seenMsgIds.add(data.msg_id);
+        // QQ 平台消息事件的唯一 ID 字段是 `id` (形如 ROBOT1.0_...), 不是 msg_id。
+        // 用错字段会得到 undefined → seenMsgIds 去重会把"第二条起的每条消息"误判为重复而丢弃!
+        const msgId = data?.id ?? data?.msg_id;
+        if (!openid || !content.trim()) {
+          // 诊断: 平台推送的消息若缺 openid/content, 打印完整摘要定位问题
+          log.warn(`[${type}] 消息字段缺失被丢弃: openid=${openid} content=${JSON.stringify(content).slice(0, 80)} msgId=${msgId ?? "?"} 原始 data 键=${Object.keys(data ?? {}).join(",")}`);
+          return;
+        }
+        if (seenMsgIds.has(msgId)) {
+          // 诊断: 平台重放/重复推送的消息
+          log.warn(`[${type}] 重复消息被去重丢弃: msgId=${msgId} content=${JSON.stringify(content).slice(0, 60)}`);
+          return;
+        }
+        seenMsgIds.add(msgId);
         const peerKey = `c2c:${openid}`;
         const targets = [{ kind: "c2c", id: openid }];
-        log.info(`C2C 消息 ${data.msg_id} 来自 ${openid}: ${content.slice(0, 60)}`);
+        log.info(`C2C 消息 ${msgId} 来自 ${openid}: ${content.slice(0, 60)}`);
         void onIncoming(peerKey, content.trim(), targets, sessionToPeer);
       } else if (type === "GROUP_AT_MESSAGE_CREATE") {
         const groupOpenid = data?.group_openid;
         const memberOpenid = data?.author?.member_openid;
         const raw = data?.content ?? "";
+        // 与 C2C 相同: 平台字段是 `id` 而非 `msg_id`
+        const msgId = data?.id ?? data?.msg_id;
         if (!groupOpenid || !memberOpenid) return;
-        if (seenMsgIds.has(data.msg_id)) return;
-        seenMsgIds.add(data.msg_id);
+        if (seenMsgIds.has(msgId)) return;
+        seenMsgIds.add(msgId);
         const content = stripMention(raw, qq.botUsername);
         if (!content) return; // 只 @ 了机器人没说话
         const peerKey = `group:${groupOpenid}:${memberOpenid}`;
         const targets = [{ kind: "group", id: groupOpenid }];
-        log.info(`群@消息 ${data.msg_id} 群=${groupOpenid.slice(0, 10)}… 成员=${memberOpenid.slice(0, 10)}… : ${content.slice(0, 60)}`);
+        log.info(`群@消息 ${msgId} 群=${groupOpenid.slice(0, 10)}… 成员=${memberOpenid.slice(0, 10)}… : ${content.slice(0, 60)}`);
         void onIncoming(peerKey, content, targets, sessionToPeer);
       } else {
         log.debug(`其他 QQ 事件: ${type}`);
