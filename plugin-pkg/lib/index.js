@@ -388,7 +388,7 @@ function apply(ctx) {
   async function writeBootLauncher() {
     const nodePath = process.execPath || 'node';
     const binPath = process.argv && process.argv[1] ? process.argv[1] : null;
-    const cwd = process.cwd ? process.cwd() : 'C:\\Users\\liu';
+    const cwd = process.cwd();
     if (!binPath) throw new Error('无法确定 dsh web 启动脚本路径 (process.argv[1])');
     const runCmd = vbsQuote(nodePath) + ' ' + vbsQuote(binPath) + ' web';
     const vbs = [
