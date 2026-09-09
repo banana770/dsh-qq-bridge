@@ -13,17 +13,216 @@
 // llm / agentDefaultModel 为可选 (ctx.get), 失败只降级不阻断。
 // 系统级操作 (注册表 Run 键 / 桌面保活 flag) 用 node:child_process (静态插件
 // 运行在真实 dsh node 进程内, 非动态沙箱)。
-// 系统级操作 (注册表 Run 键 / 桌面保活 flag) 用 node:child_process (静态插件
-// 运行在真实 dsh node 进程内, 非动态沙箱)。
-// BRIDGE_DIR 解析顺序: 环境变量 DSH_QQB_BRIDGE_DIR → 插件包所在位置推导
-// (link 安装时 node_modules/dsh-qq-bridge → plugin-pkg, 其上上级即项目根)。
+// 注意: BRIDGE_DIR 是硬编码绝对路径, 移动目录需同步修改。
 
 import { execFile, spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 const name = 'dsh-qq-bridge';
 const inject = ['fs', 'timer', 'webServer'];
+
+// ===================== /qqbapi/* — DSH 新版网关适配层 =====================
+//
+// DSH 0.1.1-rc.2 起 /api/* 全部强制浏览器 Cookie 认证 (client-connection
+// requestRejection), 桥接进程的裸 HTTP 调用会收到 401。本适配层在插件路由上
+// (无认证, 与 /qqb/* 同级) 提供旧协议兼容面, 进程内直达 typertGateway:
+//   POST /qqbapi/rpc                → 一元 RPC: {rpcId, method, payload} 旧壳,
+//                                     内部翻译为 dispatchRpc(method, {args}, signal)
+//   GET  /qqbapi/follow/add?sid=    → 为指定会话打开 session/follow 流 (SSE 保持)
+//   GET  /qqbapi/follow/drop?sid=   → 关闭对应 follow 流
+//   GET  /qqbapi/follow/stream      → SSE: 汇聚所有 follow 流的事件帧 + user-questions 帧
+//   POST /qqbapi/answer             → {clientId, eventId, value} 回填 user-questions waterfall
+//
+// 协议要点 (dsh-api-gateway 0.1.5-alpha.1):
+//   · 一元调用 args 必须恰含描述符声明的 wire 字段:
+//       session.*      → args.request = 旧 payload (session/prompt 额外要求 requestId)
+//       commands/execute → args = {agentId, line, submittedAttachments}
+//   · $events 流: open 后首帧 {type:"ready", clientId}; 之后每帧
+//       {type:"emit", event, args} | {type:"waterfall", event, eventId, agentId, request}
+//     waterfall 结果经 dispatchRpc("$events/result", {args:{clientId,eventId,outcome}})
+//     回填, outcome: {kind:"result", value} | {kind:"rejected", error} | {kind:"next"}
+//   · user-questions/request 的 value: {answers:[{id, selected:[], custom?}]}
+//     ($events/result 的 value 走到 forwardWaterfall.resolve → userQuestions.ask 返回值)
+
+function applyQqbApi(ctx) {
+  const gateway = ctx.get('typertGateway');
+  if (!gateway) {
+    console.error('[qqb] typertGateway 服务不可用, /qqbapi/* 未启用 (桥接将无法调用 DSH)');
+    return () => {};
+  }
+
+  const follows = new Map(); // sessionId -> { controller, done }
+  const sseClients = new Set(); // res 集合
+  let eventsClientId = null; // $events 流的 clientId
+  let eventsAbort = null;
+  let eventsRunning = false;
+
+  function sseWrite(res, event, data) {
+    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
+  }
+  function broadcastSse(event, data) {
+    for (const res of sseClients) sseWrite(res, event, data);
+  }
+  function sendJson(res, status, data) {
+    const body = JSON.stringify(data);
+    try {
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
+      res.end(body);
+    } catch { /* ignore */ }
+  }
+
+  // ---------- $events 流: 问询 waterfall 的进程内消费端 ----------
+  function startEvents() {
+    if (eventsRunning) return;
+    eventsRunning = true;
+    void (async () => {
+      const abort = new AbortController();
+      eventsAbort = abort;
+      try {
+        const iterator = await gateway.openWireStream('$events', { args: {} }, abort.signal);
+        for await (const frame of iterator) {
+          if (frame && frame.type === 'ready') { eventsClientId = frame.clientId; continue; }
+          if (frame && frame.type === 'waterfall' && frame.event === 'user-questions/request') {
+            broadcastSse('question', { clientId: eventsClientId, eventId: frame.eventId, agentId: frame.agentId, request: frame.request });
+            continue;
+          }
+          // 其余帧 (emit/waterfall 非问询) 一律回 kind:"next" 放行给浏览器 UI
+          if (frame && frame.type === 'waterfall') {
+            void gateway.dispatchRpc('$events/result', { args: { clientId: eventsClientId, eventId: frame.eventId, outcome: { kind: 'next' } } }, undefined).catch(() => {});
+          }
+        }
+      } catch (err) {
+        if (!abort.signal.aborted) console.error('[qqb] $events 流异常: ' + (err && err.message));
+      } finally {
+        eventsRunning = false;
+        eventsClientId = null;
+        eventsAbort = null;
+        // 断线重连
+        if (ctx && !disposedQqbApi) setTimeout(() => { try { startEvents(); } catch { /* ignore */ } }, 3000);
+      }
+    })();
+  }
+
+  // ---------- session/follow 流 ----------
+  function startFollow(sessionId) {
+    let f = follows.get(sessionId);
+    if (f && !f.done) return;
+    const controller = new AbortController();
+    f = { controller, done: false };
+    follows.set(sessionId, f);
+    void (async () => {
+      try {
+        const iterator = await gateway.openWireStream('session/follow', { args: { request: { address: { kind: 'session', sessionId } } } }, controller.signal);
+        for await (const frame of iterator) {
+          broadcastSse('session-event', { sessionId, frame });
+        }
+      } catch (err) {
+        if (!controller.signal.aborted) broadcastSse('follow-error', { sessionId, message: (err && err.message) || String(err) });
+      } finally {
+        f.done = true;
+        if (follows.get(sessionId) === f) follows.delete(sessionId);
+      }
+    })();
+  }
+
+  // ---------- HTTP 处理器 ----------
+  async function handleRpc(req, res) {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    let body = {};
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
+    const method = typeof body.method === 'string' ? body.method : '';
+    // 旧桥接用点号端点 (session.prompt), 新网关要求 namespace/method 斜杠形式
+    const endpoint = method.includes('/') ? method : method.replace(/\./g, '/');
+    const payload = body.payload && typeof body.payload === 'object' ? body.payload : {};
+    const rpcId = typeof body.rpcId === 'string' ? body.rpcId : randomUUID();
+    try {
+      let args;
+      if (endpoint === 'commands/execute') {
+        args = { agentId: payload.agentId, line: payload.line, submittedAttachments: payload.submittedAttachments ?? [] };
+      } else if (endpoint.startsWith('session/')) {
+        args = { request: payload };
+        if (endpoint === 'session/prompt' && !payload.requestId) args.request = { ...payload, requestId: randomUUID() };
+      } else {
+        args = { request: payload };
+      }
+      const value = await gateway.dispatchRpc(endpoint, { args }, undefined);
+      sendJson(res, 200, { type: 'server-response', rpcId, result: value });
+    } catch (err) {
+      sendJson(res, 200, {
+        type: 'server-response', rpcId,
+        result: { ok: false, error: { code: (err && err.code) || 'internal', message: (err && err.message) || String(err), details: {} } },
+      });
+    }
+  }
+
+  async function handleAnswer(req, res) {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    let body = {};
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* ignore */ }
+    const clientId = body.clientId || eventsClientId;
+    const eventId = body.eventId;
+    const answers = body.answers;
+    if (!clientId || !eventId || !Array.isArray(answers)) {
+      return sendJson(res, 200, { ok: false, error: '需要 clientId / eventId / answers' });
+    }
+    try {
+      await gateway.dispatchRpc('$events/result', {
+        args: { clientId, eventId, outcome: { kind: 'result', value: { answers } } },
+      }, undefined);
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, 200, { ok: false, error: (err && err.message) || String(err) });
+    }
+  }
+
+  async function handleFollowAdd(req, res, url) {
+    const sid = url.searchParams.get('sid');
+    if (!sid) return sendJson(res, 400, { ok: false, error: '缺少 sid' });
+    startEvents();
+    startFollow(sid);
+    sendJson(res, 200, { ok: true });
+  }
+  async function handleFollowDrop(req, res, url) {
+    const sid = url.searchParams.get('sid');
+    if (sid && follows.has(sid)) {
+      follows.get(sid).controller.abort();
+      sendJson(res, 200, { ok: true });
+    } else {
+      sendJson(res, 200, { ok: true, already: true });
+    }
+  }
+  function handleFollowStream(req, res) {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      'connection': 'keep-alive',
+    });
+    res.write(': connected\n\n');
+    sseClients.add(res);
+    req.on('close', () => { sseClients.delete(res); });
+  }
+
+  startEvents();
+  const routeDisposers = [
+    ctx.webServer.register({ kind: 'exact', path: '/qqbapi/rpc', handler: handleRpc }),
+    ctx.webServer.register({ kind: 'exact', path: '/qqbapi/answer', handler: handleAnswer }),
+    ctx.webServer.register({ kind: 'exact', path: '/qqbapi/follow/add', handler: (req, res) => handleFollowAdd(req, res, new URL(req.url || '/qqbapi/follow/add', 'http://x')) }),
+    ctx.webServer.register({ kind: 'exact', path: '/qqbapi/follow/drop', handler: (req, res) => handleFollowDrop(req, res, new URL(req.url || '/qqbapi/follow/drop', 'http://x')) }),
+    ctx.webServer.register({ kind: 'exact', path: '/qqbapi/follow/stream', handler: (req, res) => handleFollowStream(req, res) }),
+  ];
+  return () => {
+    disposedQqbApi = true;
+    for (const d of routeDisposers) { try { d(); } catch { /* ignore */ } }
+    if (eventsAbort) { try { eventsAbort.abort(); } catch { /* ignore */ } }
+    for (const f of follows.values()) { try { f.controller.abort(); } catch { /* ignore */ } }
+  };
+}
+
+let disposedQqbApi = false;
+
+// ===================== 原有管理半区 =====================
 
 /** 从插件包自身位置推导项目根: <proj>/plugin-pkg/lib/index.js → <proj>。 */
 function deriveBridgeDir() {
@@ -436,6 +635,12 @@ function apply(ctx) {
       ctx.webServer.register({ kind: 'exact', path: '/qqb/start', handler: handleStart }),
       ctx.webServer.register({ kind: 'exact', path: '/qqb/stop', handler: handleStop }),
     ];
+    // 新版 DSH /api/* 强制浏览器认证 → 桥接改走进程内适配层。
+    // typertGateway 可能晚于本插件就绪, 用 inject 等待服务可用再挂载。
+    let apiDisposer = null;
+    ctx.inject(['typertGateway'], (gctx) => {
+      try { apiDisposer = applyQqbApi(gctx); } catch (err) { logErr('挂载 /qqbapi 适配层失败: ' + (err && err.message)); }
+    });
     void (async () => {
       state.config = await readConfig();
       if (!state.config) {
@@ -450,6 +655,7 @@ function apply(ctx) {
     return () => {
       disposed = true;
       for (const d of routeDisposers) { try { d(); } catch (err) { /* ignore */ } }
+      try { if (apiDisposer) apiDisposer(); } catch (err) { /* ignore */ }
       clearRestartTimer();
       stopBridge();
     };

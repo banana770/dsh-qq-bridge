@@ -1,13 +1,16 @@
-// dsh.js — DeepSeek Harness Web API 客户端 (dsh --profile web 已在运行)。
-// 协议依据 dsh-host-apiproxy / dsh-client-connection:
-//   一元调用:  POST {base}/api/{method}
+// dsh.js — DeepSeek Harness Web API 客户端 (dsh web 已在运行)。
+// 自 DSH 0.1.1-rc.2 起 /api/* 强制浏览器 Cookie 认证, 桥接改走 DSH 插件
+// dsh-qq-bridge 提供的进程内适配层 /qqbapi/* (与 /api 同语义, 免认证):
+//   一元调用:  POST {base}/qqbapi/rpc
 //     body  { type:'client-request', rpcId:<uuid>, method, payload }
 //     响应  { type:'server-response', rpcId, result:{ ok, value } | { ok:false, error } }
-//   下行流:   ws://{base}/api/events.mux → 帧 { type:'server-request', rpcId, method, payload }
-//     payload.type = 'session/event' | 'question/requested' | 'session/subscribed' | ...
-//   回答问题: POST {base}/api/respond, body { type:'client-response', rpcId, result:{ ok:true, value } }
-// 回环 (127.0.0.1) 免认证, 直接可用。
-// 每个聊天对象 (peer) 映射一个 DSH 会话, 映射持久化在 sessions.json。
+//   下行事件:  GET {base}/qqbapi/follow/stream  (SSE)
+//     事件 session-event → { sessionId, frame }  frame 即 session/follow 流帧
+//        ({type:'event', event:{type,data,...}} | {type:'snapshot', records:[...], cursor})
+//     事件 question      → { clientId, eventId, agentId, request }  (DSH 提问)
+//   会话订阅:  GET {base}/qqbapi/follow/add?sid=<sessionId>  (先订阅后 prompt)
+//   回答问题:  POST {base}/qqbapi/answer, body { clientId, eventId, answers }
+// 每个 QQ 聊天对象 (peer) 映射一个 DSH 会话, 映射持久化在 sessions.json。
 
 import { EventEmitter } from "node:events";
 import { fetchRetry, sleep, makeLogger, readJsonFile, writeJsonFile } from "./util.js";
@@ -31,6 +34,7 @@ export class DSHClient extends EventEmitter {
     this.log = log ?? makeLogger();
     this.base = cfg.baseUrl.replace(/\/$/, "");
     this.map = new Map(); // peerKey -> sessionId
+    this.subscribed = new Set(); // 已确保订阅 follow 流的 sessionId
     this.muxWs = null;
     this.stopped = false;
     this.reconnectAttempts = 0;
@@ -81,7 +85,7 @@ export class DSHClient extends EventEmitter {
   async unary(method, payload, timeoutMs = 30000) {
     const rpcId = crypto.randomUUID();
     const body = { type: "client-request", rpcId, method, payload };
-    const resp = await fetchRetry(`${this.base}/api/${method}`, {
+    const resp = await fetchRetry(`${this.base}/qqbapi/rpc`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -121,9 +125,21 @@ export class DSHClient extends EventEmitter {
     return sessionId;
   }
 
+  /** 确保某会话已订阅 follow 事件流 (幂等; prompt 前调用)。 */
+  async ensureFollow(sessionId) {
+    if (this.subscribed.has(sessionId)) return;
+    const resp = await fetchRetry(`${this.base}/qqbapi/follow/add?sid=${encodeURIComponent(sessionId)}`, {
+      method: "GET",
+    }, 1, 30000);
+    if (!resp.ok) throw new Error(`DSH follow/add: HTTP ${resp.status}`);
+    this.subscribed.add(sessionId);
+    this.log.debug(`[${sessionId}] 已订阅 follow 流`);
+  }
+
   /** 向会话发一条用户消息 (mode=queue: DSH 原生排队, 上一轮未结束时自动排队)。 */
   async prompt(peerKey, text) {
     const sessionId = await this.ensureSession(peerKey);
+    await this.ensureFollow(sessionId);
     await this.unary("session.prompt", {
       sessionId,
       mode: "queue",
@@ -135,6 +151,7 @@ export class DSHClient extends EventEmitter {
   /** 向**已有**会话派发一条斜杠命令(如 /compact), 返回完整结果值 (含 command 槽: {kind:'success',text})。
    *  不创建新会话; 会话不存在时抛错由调用方处理。 */
   async promptExisting(sessionId, text) {
+    await this.ensureFollow(sessionId);
     return this.unary("session.prompt", {
       sessionId,
       mode: "queue",
@@ -156,27 +173,27 @@ export class DSHClient extends EventEmitter {
     return this.unary("session.cancel", { sessionId });
   }
 
-  /** 回答 DSH 的问题 (question/requested 帧, rpcId 即问题 id)。 */
-  async answerQuestion(rpcId, sessionId, answers) {
+  /** 回答 DSH 的问题 (question 帧 → POST /qqbapi/answer)。 */
+  async answerQuestion(question, sessionId, answers) {
     const body = {
-      type: "client-response",
-      rpcId,
-      result: { ok: true, value: { sessionId, answer: { answers } } },
+      clientId: question.clientId,
+      eventId: question.eventId,
+      answers,
     };
-    const resp = await fetchRetry(`${this.base}/api/respond`, {
+    const resp = await fetchRetry(`${this.base}/qqbapi/answer`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     }, 1, 30000);
     const data = await resp.json().catch(() => null);
-    if (!resp.ok) {
-      throw new Error(`DSH /api/respond: HTTP ${resp.status} ${JSON.stringify(data).slice(0, 200)}`);
+    if (!resp.ok || !data?.ok) {
+      throw new Error(`DSH answer: HTTP ${resp.status} ${JSON.stringify(data).slice(0, 200)}`);
     }
-    this.log.debug(`问题应答已提交 rpcId=${rpcId} -> ${JSON.stringify(data)}`);
+    this.log.debug(`问题应答已提交 eventId=${question.eventId}`);
     return data;
   }
 
-  // ---------- 下行流 (events.mux) ----------
+  // ---------- 下行事件流 (SSE: /qqbapi/follow/stream) ----------
 
   /** 常驻重连循环: 连接成功则阻塞到断开, 失败/断开后指数退避重试。 */
   async openMux() {
@@ -186,7 +203,7 @@ export class DSHClient extends EventEmitter {
         await this.connectMux(); // 连接成功时阻塞, 断开时 resolve
         retry = 0;
       } catch (err) {
-        this.log.error(`events.mux 连接失败: ${err.message}`);
+        this.log.error(`events 流连接失败: ${err.message}`);
       }
       if (this.stopped) break;
       retry++;
@@ -196,9 +213,10 @@ export class DSHClient extends EventEmitter {
 
   connectMux() {
     return new Promise((resolve, reject) => {
-      const wsUrl = this.base.replace(/^http/, "ws") + "/api/events.mux";
-      const ws = new WebSocket(wsUrl);
-      this.muxWs = ws;
+      const sseUrl = `${this.base}/qqbapi/follow/stream`;
+      // AbortController 兼容 Node 18+; bridge 要求 Node >= 22
+      const ac = new AbortController();
+      this.muxAbort = ac;
       let settled = false;
       const ok = () => {
         if (!settled) {
@@ -214,35 +232,97 @@ export class DSHClient extends EventEmitter {
         }
       };
 
-      ws.onopen = () => {
-        this.log.info("已连接 DSH events.mux 下行流");
-        this.emit("open");
-      };
-      ws.onerror = (ev) => {
-        this.log.error(`events.mux 错误: ${ev?.message ?? "websocket error"}`);
-        fail(new Error(ev?.message ?? "mux websocket error"));
-      };
-      ws.onclose = (ev) => {
-        this.log.warn(`DSH events.mux 断开 code=${ev.code}`);
-        ok();
-      };
-      ws.onmessage = (ev) => {
-        let frame;
-        try {
-          frame = JSON.parse(String(ev.data));
-        } catch {
-          return;
-        }
-        // frame: { type:'server-request', rpcId, method, payload }
-        if (frame?.type === "server-request") {
-          this.emit("frame", frame.payload, frame);
-        }
-      };
+      fetch(sseUrl, { signal: ac.signal, headers: { accept: "text/event-stream" } })
+        .then((resp) => {
+          if (!resp.ok || !resp.body) {
+            fail(new Error(`SSE HTTP ${resp.status}`));
+            return;
+          }
+          this.log.info("已连接 DSH 事件流 (/qqbapi/follow/stream SSE)");
+          this.emit("open");
+          // 手写 SSE 解析 (Web Streams API): 按 "event:"/"data:" 行组成帧
+          let eventName = "message";
+          let dataLines = [];
+          const decoder = new TextDecoder();
+          let buf = "";
+          const handleChunk = (chunk) => {
+            buf += decoder.decode(chunk, { stream: true });
+            for (;;) {
+              const idx = buf.indexOf("\n");
+              if (idx === -1) break;
+              const line = buf.slice(0, idx).replace(/\r$/, "");
+              buf = buf.slice(idx + 1);
+              if (line === "") {
+                if (dataLines.length) {
+                  this.dispatchSse(eventName, dataLines.join("\n"));
+                }
+                eventName = "message";
+                dataLines = [];
+                continue;
+              }
+              if (line.startsWith(":")) continue;
+              if (line.startsWith("event:")) eventName = line.slice(6).trim();
+              else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+            }
+          };
+          const reader = resp.body.getReader();
+          void (async () => {
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                handleChunk(value);
+              }
+              // 连接真正断开才 resolve, 让 openMux 循环安排重连
+              this.log.warn("DSH 事件流断开, 将重连");
+              ok();
+            } catch (err) {
+              if (ac.signal.aborted) { ok(); return; }
+              this.log.warn(`DSH 事件流错误: ${err?.message ?? err}`);
+              fail(err instanceof Error ? err : new Error(String(err)));
+            }
+          })();
+        })
+        .catch((err) => {
+          if (ac.signal.aborted) { ok(); return; }
+          fail(err instanceof Error ? err : new Error(String(err)));
+        });
     });
+  }
+
+  dispatchSse(eventName, dataText) {
+    let payload;
+    try {
+      payload = JSON.parse(dataText);
+    } catch {
+      return;
+    }
+    if (eventName === "session-event") {
+      // payload: { sessionId, frame } — frame: {type:'event', event:{type,data,...}}
+      const frame = payload?.frame;
+      const event = frame?.type === "event" ? frame.event : null;
+      if (event) {
+        this.emit("frame", { type: "session/event", sessionId: payload.sessionId, event }, payload);
+      }
+    } else if (eventName === "question") {
+      // payload: { clientId, eventId, agentId, request }
+      const questions = payload?.request?.questions;
+      this.emit("frame", {
+        type: "question/requested",
+        sessionId: payload?.agentId,
+        questions,
+        clientId: payload?.clientId,
+        eventId: payload?.eventId,
+      }, payload);
+    } else if (eventName === "follow-error") {
+      this.log.warn(`follow 流错误 [${payload?.sessionId}]: ${payload?.message}`);
+    }
   }
 
   async stop() {
     this.stopped = true;
-    this.muxWs?.close(1000, "bye");
+    if (this.muxAbort) {
+      try { this.muxAbort.abort(); } catch { /* ignore */ }
+    }
   }
 }

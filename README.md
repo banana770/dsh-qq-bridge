@@ -19,14 +19,25 @@ QQ 官方开放平台网关 (wss://…/gateway/bot, 官方 WebSocket)
      │
      ▼
 dsh-qq-bridge (本服务, Node.js)
-     │  ② POST /api/session.prompt (HTTP RPC)
-     │  ③ ws://127.0.0.1:3080/api/events.mux (下行流, 收回复)
+     │  ② POST /qqbapi/rpc (HTTP RPC, 旧 client-request 协议)
+     │  ③ GET  /qqbapi/follow/stream (SSE 下行流, 收回复)
+     │  ④ POST /qqbapi/answer (回填 DSH 提问)
+     ▼
+dsh-qq-bridge 插件 /qqbapi/* 适配层 (DSH 进程内, 随 dsh web 运行)
+     │  ⑤ 进程内直达 typertGateway (dispatchRpc / openWireStream)
      ▼
 DeepSeek Harness (dsh web, 已在运行, 127.0.0.1:3080)
-     │  ④ 回复文本经 QQ 开放接口 POST /v2/users|groups/…/messages
+     │  ⑥ 回复文本经 QQ 开放接口 POST /v2/users|groups/…/messages
      ▼
 QQ 用户/群成员
 ```
+
+> **为什么需要适配层**: DSH `0.1.1-rc.2` 起 `/api/*` 全部强制浏览器 Cookie
+> 认证(`dsh-client-connection` 的 `requestRejection`),本机回环也不例外,
+> 桥接进程的裸 HTTP 调用会得到 `HTTP 401`。本仓库的 `plugin-pkg` 插件在
+> DSH 进程内注册免认证的 `/qqbapi/*` 路由,把旧协议翻译成新版进程内网关
+> (`typertGateway`)调用。**升级 DSH 后需要重启 `dsh web` 一次让插件代码生效。**
+> 直接运行 `node src/main.js`(不装插件)仅在旧版 DSH 上可用。
 
 ## 快速开始
 
@@ -76,7 +87,7 @@ node src/main.js        # 或 npm start
 [INFO] 换取 access_token (appId=…) ...
 [INFO] 连接 QQ 网关: wss://…
 [INFO] 网关就绪 READY: session=… bot=…
-[INFO] 已连接 DSH events.mux 下行流
+[INFO] 已连接 DSH 事件流 (/qqbapi/follow/stream SSE)
 [INFO] ========== 桥接已就绪: QQ <-> DSH ==========
 ```
 
@@ -145,7 +156,7 @@ A: 观察是否收到 `op9`(Identify 被拒)。可尝试把 `qq.sandbox` 切换�
 A: 依次检查:① 沙箱白名单是否包含你的测试号;② 对应消息能力是否已申请开通;③ 桥接日志里是否出现事件(`C2C 消息 …` / `群@消息 …`);④ DSH 是否在运行。
 
 **Q: DSH 侧回复出现「问题」(ask_user)**
-A: 桥会把问题和选项转发到 QQ,直接回复选项编号(如 `2`)或自由文本即可;回答会通过 `/api/respond` 回填给 DSH 智能体。
+A: 桥会把问题和选项转发到 QQ,直接回复选项编号(如 `2`)或自由文本即可;回答会通过插件适配层的 `/qqbapi/answer`(进程内 `$events/result`)回填给 DSH 智能体。
 
 **Q: 消息发出去了但很久没回复**
 A: 打开 DSH Web GUI 能看到对应会话的运行过程(工具调用、提问等)。模型推理可能较长;若长时间无输出,可用 `/cancel` 中止。
@@ -158,10 +169,10 @@ dsh-qq-bridge/
 ├── src/
 │   ├── main.js           # 桥接主逻辑(事件接线、命令、提问转发)
 │   ├── qq.js             # QQ 官方 API 客户端(token/网关/WS/发消息)
-│   ├── dsh.js            # DSH Web API 客户端(RPC + events.mux + 会话映射)
+│   ├── dsh.js            # DSH 客户端(RPC + SSE 事件流 + 会话映射)
 │   ├── selftest.js       # 自检脚本
 │   └── util.js           # 日志、重试、小工具
-├── plugin-pkg/           # 可选: DSH 设置页静态插件
+├── plugin-pkg/           # 可选: DSH 设置页静态插件 + /qqbapi/* 网关适配层
 │   ├── package.json
 │   ├── cordis.patch.yml
 │   └── lib/{index.js, client.js}
@@ -171,8 +182,15 @@ dsh-qq-bridge/
 ## 安全须知
 
 - `config.json`(含 AppSecret)与 `sessions.json`(含聊天对象标识)都在 `.gitignore` 中,**不要 force-add**。
-- 桥接仅监听本地回环(127.0.0.1)调用 dsh web;dsh web 的 `/api` 在回环免认证,请勿把 3080 端口暴露到公网。
+- 桥接与插件适配层只通过本机回环(127.0.0.1)与 dsh web 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 3080 端口暴露到公网或不可信的局域网。
 
 ## 许可
 
 MIT License,详见 [LICENSE](LICENSE)。
+
+## 兼容性版本对照
+
+| 本仓库版本 | 适配的 DSH 版本 | 说明 |
+|---|---|---|
+| ≤ 0.1.0 | ≤ 0.1.1-rc.1 | 直连 `/api/*`(回环免认证时代) |
+| 当前 | ≥ 0.1.1-rc.2 (含 0.1.2-rc.x / 0.1.5-alpha.x) | 经 `plugin-pkg` 的 `/qqbapi/*` 进程内适配层 |

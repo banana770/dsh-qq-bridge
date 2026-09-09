@@ -136,13 +136,13 @@ async function main() {
         break;
       }
       case "question/requested": {
-        const { sessionId, questions } = frame;
+        const { sessionId, questions, clientId, eventId } = frame;
         const turn = activeTurns.get(sessionId);
         const peerKey = sessionToPeer.get(sessionId);
         if (!turn && !peerKey) return; // 与本桥无关的会话
         const targets = turn?.targets ?? (peerKey ? [targetFromPeerKey(peerKey)] : []);
         if (!targets.length) return;
-        pendingQuestions.set(sessionId, { rpcId: envelope?.rpcId, questions });
+        pendingQuestions.set(sessionId, { clientId, eventId, questions });
         log.info(`[${sessionId}] DSH 提问 -> ${targets.map(targetLabel).join(", ")}`);
         void forwardQuestion(targets, questions);
         break;
@@ -323,7 +323,7 @@ async function main() {
         pendingQuestions.delete(sessionId);
         const answers = parseQuestionAnswer(text, pending.questions);
         try {
-          await dsh.answerQuestion(pending.rpcId, sessionId, answers);
+          await dsh.answerQuestion(pending, sessionId, answers);
           await replyToTargets(targets, "✅ 已收到你的回答, 智能体继续处理中…");
         } catch (err) {
           log.error(`回答问题失败: ${err.message}`);

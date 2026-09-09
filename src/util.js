@@ -32,7 +32,8 @@ export async function fetchRetry(url, options = {}, retries = 2, timeoutMs = 150
     try {
       const resp = await fetch(url, {
         ...options,
-        signal: AbortSignal.timeout(timeoutMs),
+        // SSE 长连接不能带 AbortSignal.timeout; 传调用方自己的 signal
+        ...(options?.signal ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
       });
       return resp;
     } catch (err) {
