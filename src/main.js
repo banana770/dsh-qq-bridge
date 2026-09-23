@@ -120,6 +120,8 @@ async function main() {
           }
           case "turn/end": {
             activeTurns.delete(sessionId);
+            // 回合结束 => 本轮提问已失效 (可能已在 DSH 网页端作答), 清掉避免误吞下一条 QQ 消息
+            pendingQuestions.delete(sessionId);
             const reason = event.data?.reason;
             const body = turn.texts.join("\n").trim();
             log.info(
@@ -145,6 +147,20 @@ async function main() {
         pendingQuestions.set(sessionId, { clientId, eventId, questions });
         log.info(`[${sessionId}] DSH 提问 -> ${targets.map(targetLabel).join(", ")}`);
         void forwardQuestion(targets, questions);
+        break;
+      }
+      case "question/cancelled": {
+        // 提问已在别处消费 (网页端作答 / 回合结束) → 清掉等待项。
+        // 不清的话, 用户的下一条 QQ 消息会被误当成「回答」提交, 而网关对过期 eventId
+        // 只返回 ok:true 且静默丢弃, 消息就凭空消失了。
+        let cleared = 0;
+        for (const [sid, q] of pendingQuestions) {
+          if (!frame.eventId || q.eventId === frame.eventId) {
+            pendingQuestions.delete(sid);
+            cleared++;
+          }
+        }
+        log.info(`提问已失效 (eventId=${frame.eventId ?? "?"}), 清除等待项 ${cleared} 个`);
         break;
       }
       case "stream/error": {
@@ -317,7 +333,7 @@ async function main() {
       const sessionId = dsh.map.get(peerKey) ?? (await dsh.ensureSession(peerKey));
       sessionToPeerRef.set(sessionId, peerKey);
 
-      // 有待回答的问题 → 先作答
+      // 有待回答的问题 → 先作答 (失败则退化为普通消息, 不吞消息)
       const pending = pendingQuestions.get(sessionId);
       if (pending) {
         pendingQuestions.delete(sessionId);
@@ -325,11 +341,13 @@ async function main() {
         try {
           await dsh.answerQuestion(pending, sessionId, answers);
           await replyToTargets(targets, "✅ 已收到你的回答, 智能体继续处理中…");
+          return;
         } catch (err) {
-          log.error(`回答问题失败: ${err.message}`);
-          await replyToTargets(targets, "⚠️ 提交回答失败, 请稍后重试或发送 /cancel。");
+          // 提问可能已在网页端答完或回合已结束: 回填会失败,
+          // 此时不能只回一句提示就把用户消息丢掉, 要继续按普通新消息转发。
+          log.warn(`回答提问失败, 改为按新消息处理: ${err.message}`);
+          await replyToTargets(targets, "⚠️ 原提问已失效, 已把你的消息作为新消息发给 DSH。");
         }
-        return;
       }
 
       // 普通消息 → 入队给 DSH

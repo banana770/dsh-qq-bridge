@@ -13,10 +13,14 @@
 // llm / agentDefaultModel 为可选 (ctx.get), 失败只降级不阻断。
 // 系统级操作 (注册表 Run 键 / 桌面保活 flag) 用 node:child_process (静态插件
 // 运行在真实 dsh node 进程内, 非动态沙箱)。
-// 注意: BRIDGE_DIR 是硬编码绝对路径, 移动目录需同步修改。
+// 桥接项目目录 BRIDGE_DIR: 优先环境变量 DSH_QQB_BRIDGE_DIR, 否则由插件包自身
+// 位置推导 (<proj>/plugin-pkg/lib/index.js → <proj>), link: 安装即可直接工作。
 
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const name = 'dsh-qq-bridge';
 const inject = ['fs', 'timer', 'webServer'];
@@ -33,7 +37,7 @@ const inject = ['fs', 'timer', 'webServer'];
 //   GET  /qqbapi/follow/stream      → SSE: 汇聚所有 follow 流的事件帧 + user-questions 帧
 //   POST /qqbapi/answer             → {clientId, eventId, value} 回填 user-questions waterfall
 //
-// 协议要点 (dsh-api-gateway 0.1.5-alpha.1):
+// 协议要点 (dsh-api-gateway 0.1.5-alpha.1 ~ 0.1.7-alpha.2):
 //   · 一元调用 args 必须恰含描述符声明的 wire 字段:
 //       session.*      → args.request = 旧 payload (session/prompt 额外要求 requestId)
 //       commands/execute → args = {agentId, line, submittedAttachments}
@@ -43,6 +47,54 @@ const inject = ['fs', 'timer', 'webServer'];
 //     回填, outcome: {kind:"result", value} | {kind:"rejected", error} | {kind:"next"}
 //   · user-questions/request 的 value: {answers:[{id, selected:[], custom?}]}
 //     ($events/result 的 value 走到 forwardWaterfall.resolve → userQuestions.ask 返回值)
+
+// ---------- openWireStream 版本适配 ----------
+//
+// DSH 0.1.7-alpha.2 起 dsh-api-gateway 改了载体开流签名:
+//   旧 (≤ 0.1.6-alpha.x): openWireStream(endpoint, payload, signal)
+//   新 (≥ 0.1.7-alpha.2): openWireStream(endpoint, payload, uplink, peer, signal, control)
+//
+// 差异点:
+//   · signal 从第 3 位移到第 5 位, 第 3 位变成 uplink。旧代码按老位置传
+//     abort.signal 会被新版当成 uplink, 内部 AbortSignal.any([signal, ...]) 收到
+//     迭代器对象 → 抛 "signals[0] is not of type AbortSignal", $events 流永远建不起来。
+//   · $events 分支会对 uplink 调用 releaseUplink(uplink) (取 Symbol.asyncIterator),
+//     所以新版必须传一个真实 AsyncIterable; 这里传一个立即结束的空迭代器。
+//   · 第 4 位 peer 传 undefined = 沿用网关的 operator Peer。
+//   · 第 6 位 control 是「逻辑流」的 AbortController, 新版用它做 control.signal;
+//     旧版没有该参数, 忽略即可。
+//
+// 按函数 arity 自动嗅探签名, 一份代码同时兼容新旧 DSH。
+
+/** 永远立即结束的空 uplink (releaseUplink 会调用它的 return)。 */
+const EMPTY_UPLINK = Object.freeze({
+  [Symbol.asyncIterator]() {
+    return {
+      next: async () => ({ done: true, value: undefined }),
+      return: async () => ({ done: true, value: undefined }),
+    };
+  },
+});
+
+/**
+ * 跨版本打开一条 wire 流。
+ * @param gateway typertGateway 服务实例
+ * @param endpoint 形如 '$events' / 'session/follow'
+ * @param payload 形如 { args: {...} }
+ * @param signal 真实 AbortSignal
+ * @returns 可 for await 的异步迭代器
+ */
+function openWireStream(gateway, endpoint, payload, signal) {
+  if (!gateway || typeof gateway.openWireStream !== 'function') {
+    throw new Error('typertGateway.openWireStream 不可用 (DSH 版本可能过旧或网关未挂载)');
+  }
+  // 新版: (endpoint, payload, uplink, peer, signal, control)
+  if (gateway.openWireStream.length >= 4) {
+    return gateway.openWireStream(endpoint, payload, EMPTY_UPLINK, undefined, signal, new AbortController());
+  }
+  // 旧版: (endpoint, payload, signal)
+  return gateway.openWireStream(endpoint, payload, signal);
+}
 
 function applyQqbApi(ctx) {
   const gateway = ctx.get('typertGateway');
@@ -79,9 +131,15 @@ function applyQqbApi(ctx) {
       const abort = new AbortController();
       eventsAbort = abort;
       try {
-        const iterator = await gateway.openWireStream('$events', { args: {} }, abort.signal);
+        const iterator = await openWireStream(gateway, '$events', { args: {} }, abort.signal);
         for await (const frame of iterator) {
           if (frame && frame.type === 'ready') { eventsClientId = frame.clientId; continue; }
+          // 提问被别处消费时 (网页端作答 / 回合结束 / 中止), 网关会下发 { type: 'cancel', eventId }。
+          // 必须转发给桥接端: 否则桥接永远以为提问还挂着, 会持续把用户消息当成「回答」而被网关静默丢弃。
+          if (frame && frame.type === 'cancel') {
+            broadcastSse('question-cancelled', { eventId: frame.eventId });
+            continue;
+          }
           if (frame && frame.type === 'waterfall' && frame.event === 'user-questions/request') {
             broadcastSse('question', { clientId: eventsClientId, eventId: frame.eventId, agentId: frame.agentId, request: frame.request });
             continue;
@@ -112,7 +170,7 @@ function applyQqbApi(ctx) {
     follows.set(sessionId, f);
     void (async () => {
       try {
-        const iterator = await gateway.openWireStream('session/follow', { args: { request: { address: { kind: 'session', sessionId } } } }, controller.signal);
+        const iterator = await openWireStream(gateway, 'session/follow', { args: { request: { address: { kind: 'session', sessionId } } } }, controller.signal);
         for await (const frame of iterator) {
           broadcastSse('session-event', { sessionId, frame });
         }
@@ -168,9 +226,15 @@ function applyQqbApi(ctx) {
       return sendJson(res, 200, { ok: false, error: '需要 clientId / eventId / answers' });
     }
     try {
-      await gateway.dispatchRpc('$events/result', {
+      // 注意: dispatchRpc 对 $events/result 不抛异常, 失败以 {ok:false,error} 返回。
+      // 不检查就会把「提问已失效」误报成成功, 让调用方白白吞掉用户消息。
+      const outcome = await gateway.dispatchRpc('$events/result', {
         args: { clientId, eventId, outcome: { kind: 'result', value: { answers } } },
       }, undefined);
+      if (outcome && outcome.ok === false) {
+        const why = (outcome.error && (outcome.error.message || outcome.error.code)) || '未知错误';
+        return sendJson(res, 200, { ok: false, error: '回答未能回填 (该提问可能已结束或已在网页端作答): ' + why });
+      }
       sendJson(res, 200, { ok: true });
     } catch (err) {
       sendJson(res, 200, { ok: false, error: (err && err.message) || String(err) });
@@ -227,16 +291,20 @@ let disposedQqbApi = false;
 /** 从插件包自身位置推导项目根: <proj>/plugin-pkg/lib/index.js → <proj>。 */
 function deriveBridgeDir() {
   try {
-    return join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  } catch {
-    return undefined;
-  }
+    const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    // 仅在推导结果确实是桥接项目 (含 src/main.js) 时采用, 避免插件包被复制/改名后指错目录
+    if (existsSync(join(dir, 'src', 'main.js'))) return dir;
+  } catch { /* ignore */ }
+  return undefined;
 }
 
 function apply(ctx) {
   // 桥接项目目录 (dsh-qq-bridge): 优先环境变量 DSH_QQB_BRIDGE_DIR,
   // 否则从插件包位置推导 (适用于 link: 安装与普通 npm 安装的项目内使用)。
   const BRIDGE_DIR = process.env.DSH_QQB_BRIDGE_DIR || deriveBridgeDir();
+  if (!BRIDGE_DIR) {
+    console.error('[qqb] 无法定位桥接项目目录: 请设置环境变量 DSH_QQB_BRIDGE_DIR=<dsh-qq-bridge 目录> 后重启 dsh web');
+  }
   const LOG_CAP = 300;
 
   const state = {

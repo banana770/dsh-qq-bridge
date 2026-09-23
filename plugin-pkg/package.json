@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "QQ 官方机器人桥接管理插件 (DeepSeek Harness 设置页): 桥接状态/日志、appId/appSecret/沙箱/模型配置、启停与自动重启",
   "type": "module",
   "main": "lib/index.js",

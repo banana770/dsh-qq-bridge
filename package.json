@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Bridge between DeepSeek Harness (dsh web API) and QQ official bot platform (q.qq.com)",
   "type": "module",
   "engines": {

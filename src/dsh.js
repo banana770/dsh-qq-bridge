@@ -314,6 +314,9 @@ export class DSHClient extends EventEmitter {
         clientId: payload?.clientId,
         eventId: payload?.eventId,
       }, payload);
+    } else if (eventName === "question-cancelled") {
+      // payload: { eventId } — 该提问已被别处消费 (网页端作答 / 回合结束 / 已中止)
+      this.emit("frame", { type: "question/cancelled", eventId: payload?.eventId }, payload);
     } else if (eventName === "follow-error") {
       this.log.warn(`follow 流错误 [${payload?.sessionId}]: ${payload?.message}`);
     }
