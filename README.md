@@ -1,127 +1,118 @@
 # dsh-qq-bridge
 
-[English](README.md) | [中文](README.zh-CN.md)
+[中文](README.md) | [English](README.en.md)
 
-A lightweight bridge that connects **DeepSeek Harness** (`dsh web`, the local Web API on
-port 3080) to the **QQ Bot Open Platform** (q.qq.com), so a QQ bot can talk to users
-through the agents running inside Harness.
+把 **DeepSeek Harness**(`dsh web`,本机 3080 端口的 Web API)桥接到 **QQ 官方机器人开放平台**(q.qq.com)的轻量桥接服务,让 QQ 机器人直接用 Harness 里的智能体与用户对话。
 
-- Zero dependencies — only Node.js >= 22 (built-in `fetch` / `WebSocket`)
-- Does not patch DSH: it reuses the `dsh web` instance you already have running
-- Every chat peer (private user / group member) maps to its own DSH session, so histories never mix
-- Supports DSH "ask user" (`ask_user`) prompts: the question is forwarded to QQ and the answer is fed back automatically
-- Group chats trigger only when the bot is @-mentioned; private chats (C2C) work directly
-- Optional: install as a "QQ Bot" management plugin inside the DSH settings page (status / logs / model / toggles)
+- 零依赖,仅需 Node.js ≥ 22(内置 `fetch` / `WebSocket`)
+- 不修改 DSH 任何代码,复用正在运行的 `dsh web` 实例
+- 每个聊天对象(私聊用户 / 群成员)自动映射一个独立的 DSH 会话,历史互不串扰
+- 支持 DSH 的「提问」(ask_user)交互:问题转发到 QQ,回复自动回填
+- 群聊需 @机器人 才触发;私聊(C2C)直接对话
+- 可选:安装为 DSH 设置页里的「QQ 机器人」管理插件(状态/日志/模型/开关可视化)
 
-## Architecture
+## 架构
 
 ```
-QQ user / group member
-     |  1. private message / group @-message
-     v
-QQ Bot Open Platform gateway (wss://.../gateway/bot, official WebSocket)
-     |
-     v
-dsh-qq-bridge (this service, Node.js)
-     |  2. POST /qqbapi/rpc           (HTTP RPC, legacy client-request protocol)
-     |  3. GET  /qqbapi/follow/stream (SSE downlink, receives replies)
-     |  4. POST /qqbapi/answer        (feeds answers back into DSH questions)
-     v
-dsh-qq-bridge plugin /qqbapi/* adapter (inside the DSH process, runs with dsh web)
-     |  5. in-process calls to typertGateway (dispatchRpc / openWireStream)
-     v
-DeepSeek Harness (dsh web, already running, 127.0.0.1:3080)
-     |  6. reply text via QQ Open API POST /v2/users|groups/.../messages
-     v
-QQ user / group member
+QQ 用户/群成员
+     │  ① 私聊消息 / 群@消息
+     ▼
+QQ 官方开放平台网关 (wss://…/gateway/bot, 官方 WebSocket)
+     │
+     ▼
+dsh-qq-bridge (本服务, Node.js)
+     │  ② POST /qqbapi/rpc (HTTP RPC, 旧 client-request 协议)
+     │  ③ GET  /qqbapi/follow/stream (SSE 下行流, 收回复)
+     │  ④ POST /qqbapi/answer (回填 DSH 提问)
+     ▼
+dsh-qq-bridge 插件 /qqbapi/* 适配层 (DSH 进程内, 随 dsh web 运行)
+     │  ⑤ 进程内直达 typertGateway (dispatchRpc / openWireStream)
+     ▼
+DeepSeek Harness (dsh web, 已在运行, 127.0.0.1:3080)
+     │  ⑥ 回复文本经 QQ 开放接口 POST /v2/users|groups/…/messages
+     ▼
+QQ 用户/群成员
 ```
 
-> **Why the adapter layer is needed.** Starting with DSH `0.1.1-rc.2`, every `/api/*`
-> route requires browser Cookie authentication (`requestRejection` in
-> `dsh-client-connection`) — loopback included — so the bridge's raw HTTP calls get
-> `HTTP 401`. The `plugin-pkg` plugin in this repo registers unauthenticated
-> `/qqbapi/*` routes inside the DSH process and translates the legacy protocol into
-> in-process gateway calls (`typertGateway`). **After upgrading DSH, restart `dsh web`
-> once so the plugin code takes effect.** Running `node src/main.js` without the plugin
-> only works on old DSH versions.
+> **为什么需要适配层**: DSH `0.1.1-rc.2` 起 `/api/*` 全部强制浏览器 Cookie
+> 认证(`dsh-client-connection` 的 `requestRejection`),本机回环也不例外,
+> 桥接进程的裸 HTTP 调用会得到 `HTTP 401`。本仓库的 `plugin-pkg` 插件在
+> DSH 进程内注册免认证的 `/qqbapi/*` 路由,把旧协议翻译成新版进程内网关
+> (`typertGateway`)调用。**升级 DSH 后需要重启 `dsh web` 一次让插件代码生效。**
+> 直接运行 `node src/main.js`(不装插件)仅在旧版 DSH 上可用。
 
-## Quick start
+## 快速开始
 
-### 1. Prerequisites
+### 1. 准备
 
-> `127.0.0.1:3080` is just **the default address of `dsh web` on your own machine**.
-> The bridge and `dsh web` must run on the **same computer** because they talk over
-> localhost. That holds for everyone; there is no "only works on one machine"
-> limitation. If your `dsh web` uses another port, change `dsh.baseUrl` in `config.json`.
+> 「127.0.0.1:3080」是 **dsh web 在你本机上的默认地址** —— 桥接与 dsh web 必须在**同一台电脑**上运行,
+> 通过 localhost 通信。每台电脑都如此, 不存在“只有某台机器能用”的限制。若你的 dsh web 端口不同,
+> 改 `config.json` 的 `dsh.baseUrl` 即可。
 
-- A running `dsh web` (Web GUI, default `http://127.0.0.1:3080`)
-- Node.js >= 22: check with `node --version`
-- A bot created at [q.qq.com](https://q.qq.com/qqbot/openclaw/index.html), together with its **AppID** and **AppSecret**
-  - New bots start in **sandbox mode**: only the developer's own QQ account and whitelisted test members can talk to them. Open access requires review and publishing.
+- 已运行 `dsh web`(Web GUI,默认 `http://127.0.0.1:3080`)
+- Node.js ≥ 22:`node --version`
+- 在 [q.qq.com](https://q.qq.com/qqbot/openclaw/index.html) 创建好的机器人,拿到 **AppID** 和 **AppSecret**
+  - 新机器人在**沙箱模式**,仅开发者本人 QQ 及测试成员可对话;上架/发布后才对全体用户开放
 
-### 2. Configure
+### 2. 配置
 
 ```bash
-# copy the template and fill in your own AppID / AppSecret
+# 复制配置并填入你的 AppID / AppSecret
 cp config.example.json config.json   # Windows: copy config.example.json config.json
 ```
 
-Key fields in `config.json`:
+`config.json` 关键字段:
 
-| Field | Meaning |
+| 字段 | 说明 |
 |---|---|
-| `qq.appId` / `qq.appSecret` | copied from the bot settings page on q.qq.com |
-| `qq.sandbox` | `true` = sandbox (default for new bots), `false` = production |
-| `dsh.baseUrl` | DSH Web address, default `http://127.0.0.1:3080` |
-| `dsh.workspaceCwd` | working directory for newly created DSH sessions (point it at your usual project folder) |
-| `dsh.agentPreset` | optional; chat mode = DSH agent preset: `standard` / `code` (PTC) / `minimal` / `cordis`; leave empty to follow the Harness default |
-| `dsh.model` | optional; pin `provider` / `model` plus `reasoningEffort` (for example `off` / `high` / `max`, model-dependent) |
-| `dsh.sessionsFile` | peer <-> DSH session map, generated automatically |
-| `bridge.autoStart` | when the bridge is managed by the plugin, start it automatically on plugin load (irrelevant for standalone runs) |
+| `qq.appId` / `qq.appSecret` | q.qq.com 机器人设置页复制 |
+| `qq.sandbox` | `true` = 沙箱环境(新机器人默认),`false` = 正式环境 |
+| `dsh.baseUrl` | DSH Web 地址,默认 `http://127.0.0.1:3080` |
+| `dsh.workspaceCwd` | 新建 DSH 会话的工作目录(建议指向你的常用项目目录) |
+| `dsh.agentPreset` | 可选,聊天模式 = DSH 的 Agent 预设:`standard`(标准)/ `code`(PTC)/ `minimal`(极简)/ `cordis`(创造),留空 = 跟随 Harness 默认 |
+| `dsh.model` | 可选,指定模型 `provider` / `model`,以及 `reasoningEffort`(推理等级,如 `off`/`high`/`max`,视模型而定) |
+| `dsh.sessionsFile` | 聊天对象 ↔ DSH 会话 的映射文件,自动生成 |
+| `bridge.autoStart` | 由插件托管时,插件加载自动拉起桥接(独立运行时无用) |
 
-> `appSecret` is shown only once, at creation time. **`config.json` is covered by
-> `.gitignore` — never commit it to a public repository.** If you suspect a leak, reset
-> the secret in the q.qq.com console and update the config.
+> ⚠️ `appSecret` 只在创建时显示一次。**`config.json` 已被 .gitignore 忽略,绝不提交到任何公开仓库**;
+> 若担心泄露,去 q.qq.com 控制台重置密钥后更新配置。
 
-### 3. Run
+### 3. 运行
 
 ```bash
-node src/main.js        # or: npm start
+node src/main.js        # 或 npm start
 ```
 
-You should see (log messages are in Chinese):
+启动后应看到:
 
 ```
-[INFO] 换取 access_token (appId=...) ...
-[INFO] 连接 QQ 网关: wss://...
-[INFO] 网关就绪 READY: session=... bot=...
+[INFO] 换取 access_token (appId=…) ...
+[INFO] 连接 QQ 网关: wss://…
+[INFO] 网关就绪 READY: session=… bot=…
 [INFO] 已连接 DSH 事件流 (/qqbapi/follow/stream SSE)
 [INFO] ========== 桥接已就绪: QQ <-> DSH ==========
 ```
 
-### 4. Usage
+### 4. 使用
 
-- **Private chat**: message the bot from any QQ account (test members must be configured in the console first)
-- **Group chat**: invite the bot into a group and @-mention it (only @-messages are received)
+- **私聊**:直接用任意 QQ 号给机器人发消息(测试成员需先在开放平台配置)
+- **群聊**:把机器人拉进群,发消息时 @机器人(仅收到 @ 机器人的消息)
 
-Built-in commands:
+可用命令:
 
-| Command | Effect |
+| 命令 | 作用 |
 |---|---|
-| `/help` | command list |
-| `/status` | bridge and session status |
-| `/cancel` | abort the current turn |
-| `/reset` | clear this chat's context and start a brand-new DSH session |
-| `/compact` | manually compact the conversation history (DSH also compacts automatically when the context fills up, so this is rarely needed) |
+| `/help` | 命令列表 |
+| `/status` | 桥接与会话状态 |
+| `/cancel` | 中止当前轮次 |
+| `/reset` | 清空本聊天上下文,开启全新 DSH 会话 |
+| `/compact` | 手动压缩当前对话历史(上下文满时 DSH 会自动压缩,一般无需手动) |
 
-## Optional integration A: install as a DSH settings-page plugin (`plugin-pkg`)
+## 可选集成 A:安装为 DSH 设置页插件(`plugin-pkg`)
 
-`plugin-pkg/` is a **DeepSeek Harness static plugin**. It adds a "QQ Bot" card to the
-settings page where you can view bridge status and logs, edit
-AppID/Secret/sandbox/model/chat mode/reasoning effort, configure **autostart on boot**
-and **keep-alive after closing the window**, and start / stop / restart the bridge.
+`plugin-pkg/` 是 **DeepSeek Harness 静态插件**:设置页出现「QQ 机器人」卡片,可查看桥接状态/日志、改 AppID/Secret/沙箱/模型/聊天模式/推理等级、配置**开机自启**与**关窗保活**,启停与自动重启桥接。
 
-1. Edit your dsh profile (`~/.dsh/profiles/web/package.json`) and add:
+1. 修改你的 dsh profile(`~/.dsh/profiles/web/package.json`),添加:
 
    ```jsonc
    {
@@ -130,120 +121,89 @@ and **keep-alive after closing the window**, and start / stop / restart the brid
    }
    ```
 
-2. Restart `dsh web`, then open **Settings -> QQ Bot**.
+2. 重启 `dsh web`,进入「设置 → QQ 机器人」。
 
-> The plugin has to locate the bridge project directory. By default it derives it from
-> its own location (with a `link:` install that is the project root). If your layout
-> differs, set `DSH_QQB_BRIDGE_DIR=<absolute path to dsh-qq-bridge>` in the environment
-> of the `dsh web` process.
+> 插件需要能找到桥接项目目录:`plugin-pkg` 默认从自身位置推导(link 安装时即项目根)。
+> 若你的目录结构不同,给运行 dsh web 的进程设置环境变量 `DSH_QQB_BRIDGE_DIR=<桥接项目绝对路径>` 覆盖。
 
-## Optional integration B: system autostart / keep-alive (Windows only)
+## 可选集成 B:系统级开机自启 / 关窗保活(仅 Windows)
 
-The "System" card on the settings page has two toggles (they can also be set in the
-`system` section of `config.json`):
+设置页「系统」卡里有两个开关(也可以在 `config.json` 的 `system` 段配置):
 
-- **Autostart on boot** (`system.bootAutoStart`): after Windows login, start `dsh web`
-  and the bridge in the background (hidden windows, no UI). Implemented with a generated
-  VBS launcher plus an `HKCU\...\CurrentVersion\Run` registry entry.
-- **Keep-alive after close** (`system.keepAliveAfterClose`): after closing the DSH desktop
-  window, keep the backend and the bridge running. Implemented with a `keep-backend.flag`
-  file in the bridge project directory, which the desktop wrapper's `main.js` checks
-  before killing child processes.
+- **开机自启**(`system.bootAutoStart`):登录 Windows 后后台自动启动 dsh web 与桥接(隐藏窗口,不弹界面)。
+  实现:生成 VBS 启动器 + 写 `HKCU\...\CurrentVersion\Run` 注册表项。
+- **关窗保活**(`system.keepAliveAfterClose`):关闭 DSH 桌面版窗口后,后端与桥接仍在后台运行。
+  实现:桥接项目目录下创建 `keep-backend.flag`,配合桌面封装的 main.js 检测该文件决定是否杀掉子进程。
 
-With both toggles on, the QQ bot is ready right after boot with no window open. On
-non-Windows systems the registry / VBS operations fail safely (they are only logged);
-everything else keeps working.
+两个开关都开 → 开机即可用 QQ 机器人聊天,无需打开任何窗口。
+非 Windows 系统:注册表/VBS 操作会失败并被捕获(仅记日志),其余功能不受影响。
 
-## Platform rules (important)
+## 平台规则须知(重要)
 
-1. **Sandbox mode**: before review/publishing, a new bot is sandboxed — only the
-   developer and whitelisted "test members" can talk to it. Add test QQ numbers under
-   the "Sandbox configuration" section of the q.qq.com console.
-2. **Private / group permissions**: request the "private message" and "group message"
-   capabilities under "Developer settings -> Feature configuration". Without them,
-   messages of that type are never delivered to the bot.
-3. **Passive-reply window**: the platform only lets a bot message a user who interacted
-   within the **last 5 minutes**. If a DSH turn exceeds that window the reply fails
-   (4xx in the log); have the user send another message to reopen it.
-4. **Rate limits**: a single group text message is capped at roughly 2000 characters
-   (this bridge splits at 1800 by default) and is subject to platform rate limiting;
-   avoid spamming.
-5. **@-mention**: group messages must @-mention the bot; private chat has no such
-   requirement.
+1. **沙箱模式**:新机器人在审核上架前处于沙箱,只有开发者(创建者)与「测试成员」能对话。在 q.qq.com 控制台的「沙箱配置」里把测试 QQ 号加入白名单。
+2. **私聊 / 群聊权限**:在控制台「开发设置 → 功能配置」里申请「私聊消息」「群聊消息」能力。未开通时对应类型的消息不会推送给机器人。
+3. **被动回复窗口**:官方限制机器人只能对**最近 5 分钟内有交互**的用户主动发消息。DSH 轮次若超过窗口,回复会失败(日志出现 4xx),此时让用户再发一条即可。
+4. **消息频率限制**:群聊机器人单条文本上限约 2000 字(本桥默认按 1800 切分),并受平台频控约束;多轮对话请勿高频刷消息。
+5. **@ 触发**:群聊必须 @机器人,私聊无此限制。
 
-## FAQ
+## 常见问题
 
-**Q: Startup fails with "换取 access_token 失败" (failed to exchange access token)**
-A: Check `appId` / `appSecret`, and make sure the bot has been created and enabled.
+**Q: 启动报「换取 access_token 失败」**
+A: 检查 appId / appSecret 是否正确;机器人是否已创建并启用。
 
-**Q: Connected to the gateway but no READY**
-A: Look for `op9` (Identify rejected). Try flipping `qq.sandbox`, and make sure the host
-can reach `api.bot.qq.com` / `sandbox.api.sgroup.qq.com`.
+**Q: 连接网关后没有 READY**
+A: 观察是否收到 `op9`(Identify 被拒)。可尝试把 `qq.sandbox` 切换后再试;确认网络能访问 `api.bot.qq.com` / `sandbox.api.sgroup.qq.com`。
 
-**Q: No response to private or group messages**
-A: Check, in order: (1) is your test account in the sandbox whitelist; (2) is the
-matching message capability enabled; (3) do bridge logs show the event (`C2C 消息 ...` /
-`群@消息 ...`); (4) is DSH running.
+**Q: 私聊/群聊发消息没反应**
+A: 依次检查:① 沙箱白名单是否包含你的测试号;② 对应消息能力是否已申请开通;③ 桥接日志里是否出现事件(`C2C 消息 …` / `群@消息 …`);④ DSH 是否在运行。
 
-**Q: DSH asks a question (ask_user)**
-A: The bridge forwards the question and its options to QQ — reply with the option number
-(for example `2`) or with free text. Answers are fed back through the plugin adapter's
-`/qqbapi/answer` route (in-process `$events/result`).
+**Q: DSH 侧回复出现「问题」(ask_user)**
+A: 桥会把问题和选项转发到 QQ,直接回复选项编号(如 `2`)或自由文本即可;回答会通过插件适配层的 `/qqbapi/answer`(进程内 `$events/result`)回填给 DSH 智能体。
 
-**Q: The message was sent but there is no reply for a long time**
-A: Open the DSH Web GUI to watch the session (tool calls, questions, ...). Model reasoning
-can take a while; if it stalls, use `/cancel`.
+**Q: 消息发出去了但很久没回复**
+A: 打开 DSH Web GUI 能看到对应会话的运行过程(工具调用、提问等)。模型推理可能较长;若长时间无输出,可用 `/cancel` 中止。
 
-**Q: I answered a question on the DSH web page, and now my next QQ message disappears**
-A: Fixed in v1.0.1. The gateway emits a `{ type: "cancel", eventId }` frame when a question
-is consumed elsewhere (answered in the browser, turn ended, or aborted). The bridge used to
-ignore that frame, so it still believed a question was pending and treated the next QQ
-message as an "answer" — which the gateway then silently dropped. The bridge now clears the
-pending question on `cancel`, and pushes back an explicit "this question has expired" reply
-so the user's message is never swallowed.
+**Q: 我在 DSH 网页端把提问答了,之后 QQ 再发消息就不见了**
+A: v1.0.1 已修复。提问被别处消费时(网页端作答 / 回合结束 / 中止),网关会下发一帧 `{ type: "cancel", eventId }`;旧版本桥接忽略了它,于是仍以为提问挂着,把用户的下一条 QQ 消息当成「回答」提交,而网关对过期 eventId 只静默丢弃 —— 消息就凭空消失。现在桥接会在收到 `cancel` 时清掉等待项,并在回填失败时明确提示「原提问已失效」,不再吞掉用户消息。
 
-## Repository layout
+## 文件结构
 
 ```
 dsh-qq-bridge/
-  config.example.json   # template (copy to config.json, which is gitignored)
-  src/
-    main.js             # bridge core (event wiring, commands, question relay)
-    qq.js               # QQ Open API client (token / gateway / WS / send message)
-    dsh.js              # DSH client (RPC + SSE event stream + session mapping)
-    selftest.js         # self-test script
-    util.js             # logging, retry, small helpers
-  plugin-pkg/           # optional: DSH settings-page static plugin + /qqbapi/* adapter
-    package.json
-    cordis.patch.yml
-    lib/{index.js, client.js}
-  package.json
+├── config.example.json   # 配置模板 (config.json 由你复制生成, 已被 .gitignore 忽略)
+├── src/
+│   ├── main.js           # 桥接主逻辑(事件接线、命令、提问转发)
+│   ├── qq.js             # QQ 官方 API 客户端(token/网关/WS/发消息)
+│   ├── dsh.js            # DSH 客户端(RPC + SSE 事件流 + 会话映射)
+│   ├── selftest.js       # 自检脚本
+│   └── util.js           # 日志、重试、小工具
+├── plugin-pkg/           # 可选: DSH 设置页静态插件 + /qqbapi/* 网关适配层
+│   ├── package.json
+│   ├── cordis.patch.yml
+│   └── lib/{index.js, client.js}
+└── package.json
 ```
 
-## Security notes
+## 安全须知
 
-- `config.json` (holds the AppSecret) and `sessions.json` (holds chat peer identifiers)
-  are both gitignored — **never force-add them**.
-- The bridge and the plugin adapter only talk to `dsh web` over loopback (127.0.0.1). The
-  `/qqbapi/*` adapter is an **unauthenticated** local interface designed for the local
-  bridge process (matching the loopback `/api` behaviour of older DSH). Do not expose port
-  3080 to the public internet or to untrusted LANs.
+- `config.json`(含 AppSecret)与 `sessions.json`(含聊天对象标识)都在 `.gitignore` 中,**不要 force-add**。
+- 桥接与插件适配层只通过本机回环(127.0.0.1)与 dsh web 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 3080 端口暴露到公网或不可信的局域网。
 
-## Version compatibility
+## 兼容性版本对照
 
-| Repo version | DSH version | Notes |
+| 本仓库版本 | 适配的 DSH 版本 | 说明 |
 |---|---|---|
-| <= 0.1.0 | <= 0.1.1-rc.1 | direct `/api/*` access (loopback-unauthenticated era) |
-| 1.0.0 | >= 0.1.1-rc.2 (incl. 0.1.2-rc.x, 0.1.5-alpha.x) | via the `/qqbapi/*` in-process adapter in `plugin-pkg` |
-| 1.0.1 (current) | >= 0.1.1-rc.2, incl. **0.1.7-alpha.2** | auto-detects both `openWireStream` signatures; forwards gateway `cancel` frames so an expired question no longer swallows the next QQ message |
+| ≤ 0.1.0 | ≤ 0.1.1-rc.1 | 直连 `/api/*`(回环免认证时代) |
+| 1.0.0 | ≥ 0.1.1-rc.2(含 0.1.2-rc.x / 0.1.5-alpha.x) | 经 `plugin-pkg` 的 `/qqbapi/*` 进程内适配层 |
+| 1.0.1 (当前) | ≥ 0.1.1-rc.2,含 **0.1.7-alpha.2** | 自动嗅探 `openWireStream` 新旧两种签名;转发网关 `cancel` 帧,提问过期不再吞掉下一条 QQ 消息 |
 
-> **DSH 0.1.7-alpha.2 note.** `dsh-api-gateway` changed the wire-stream entry point:
-> `openWireStream(endpoint, payload, signal)` became
-> `openWireStream(endpoint, payload, uplink, peer, signal, control)`. Passing the old third
-> argument made the gateway reject the signal (`signals[0] is not of type AbortSignal`), so
-> the `$events` stream could never be established and no replies ever reached QQ. The plugin
-> now sniffs the function arity and adapts to both signatures.
+> **关于 DSH 0.1.7-alpha.2**:`dsh-api-gateway` 改了载体开流签名,
+> `openWireStream(endpoint, payload, signal)` 变为
+> `openWireStream(endpoint, payload, uplink, peer, signal, control)`。
+> 继续按老位置传 signal 会被新版当成 uplink,内部 `AbortSignal.any` 抛
+> `signals[0] is not of type AbortSignal`,`$events` 流永远建不起来、回复也就回不到 QQ。
+> 插件现按函数 arity 自动嗅探,一份代码同时兼容新旧 DSH。
 
-## License
+## 许可
 
-MIT License — see [LICENSE](LICENSE).
+MIT License,详见 [LICENSE](LICENSE)。
