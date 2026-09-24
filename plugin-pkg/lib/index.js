@@ -303,7 +303,7 @@ function apply(ctx) {
   // 否则从插件包位置推导 (适用于 link: 安装与普通 npm 安装的项目内使用)。
   const BRIDGE_DIR = process.env.DSH_QQB_BRIDGE_DIR || deriveBridgeDir();
   if (!BRIDGE_DIR) {
-    console.error('[qqb] 无法定位桥接项目目录: 请设置环境变量 DSH_QQB_BRIDGE_DIR=<dsh-qq-bridge 目录> 后重启 dsh web');
+    console.error('[qqb] 无法定位桥接项目目录: 请设置环境变量 DSH_QQB_BRIDGE_DIR=<dsh-qq-bridge 目录> 后重启 DeepSeek Harness（桌面端或 dsh web）');
   }
   const LOG_CAP = 300;
 
@@ -656,7 +656,7 @@ function apply(ctx) {
     const nodePath = process.execPath || 'node';
     const binPath = process.argv && process.argv[1] ? process.argv[1] : null;
     const cwd = process.cwd();
-    if (!binPath) throw new Error('无法确定 dsh web 启动脚本路径 (process.argv[1])');
+    if (!binPath) throw new Error('无法确定 DeepSeek Harness 启动脚本路径 (process.argv[1])');
     const runCmd = vbsQuote(nodePath) + ' ' + vbsQuote(binPath) + ' web';
     // 注意: VBS 内容必须保持纯 ASCII —— wscript 按系统 ANSI 代码页解析脚本,
     // 中文(UTF-8)注释在部分开机早期环境下会让解析异常, 导致自启静默失败。

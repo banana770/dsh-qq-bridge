@@ -1,4 +1,4 @@
-// main.js — dsh-qq-bridge 入口: 把 QQ 官方机器人的消息桥接到 DeepSeek Harness (dsh web)。
+// main.js — dsh-qq-bridge 入口: 把 QQ 官方机器人的消息桥接到 DeepSeek Harness（桌面端或 dsh web）。
 // 每个聊天对象 (私聊用户 / 群成员) 对应一个 DSH 会话, 回复经 events.mux 流式收集后发回 QQ。
 
 import { readFileSync } from "node:fs";
@@ -362,7 +362,7 @@ async function main() {
     } catch (err) {
       log.error(`[${peerKey}] 转发失败: ${err.message}`);
       const hint = err.message.includes("fetch") || err.message.includes("ECONN")
-        ? "DSH (DeepSeek Harness) 似乎没有在运行, 请先启动 dsh web。"
+        ? "DSH (DeepSeek Harness) 似乎没有在运行, 请先启动 DeepSeek Harness（桌面端或 dsh web）。"
         : `DSH 调用失败: ${err.message}`;
       await replyToTargets(targets, "⚠️ " + hint);
     }

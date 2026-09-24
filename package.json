@@ -1,7 +1,7 @@
 {
   "name": "dsh-qq-bridge",
-  "version": "1.0.1",
-  "description": "把 DeepSeek Harness (dsh web) 桥接到 QQ 官方机器人平台 (q.qq.com) 的零依赖 Node.js 桥接服务",
+  "version": "1.0.2",
+  "description": "把 DeepSeek Harness (DSH 桌面端或 dsh web) 桥接到 QQ 官方机器人平台 (q.qq.com) 的零依赖 Node.js 桥接服务",
   "type": "module",
   "engines": {
     "node": ">=22"

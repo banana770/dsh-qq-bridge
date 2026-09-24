@@ -1,4 +1,4 @@
-// dsh.js — DeepSeek Harness Web API 客户端 (dsh web 已在运行)。
+// dsh.js — DeepSeek Harness 本地 API 客户端（桌面端或 dsh web 已在运行）。
 // 自 DSH 0.1.1-rc.2 起 /api/* 强制浏览器 Cookie 认证, 桥接改走 DSH 插件
 // dsh-qq-bridge 提供的进程内适配层 /qqbapi/* (与 /api 同语义, 免认证):
 //   一元调用:  POST {base}/qqbapi/rpc

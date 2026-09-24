@@ -2,16 +2,26 @@
 
 [English](README.en.md) | [中文](README.md)
 
-A lightweight bridge that connects **DeepSeek Harness** (`dsh web`, the local Web API on
-port 3080) to the **QQ Bot Open Platform** (q.qq.com), so a QQ bot can talk to users
+A lightweight bridge that connects **DeepSeek Harness** (DSH Desktop or `dsh web`, via its
+local API) to the **QQ Bot Open Platform** (q.qq.com), so a QQ bot can talk to users
 through the agents running inside Harness.
 
 - Zero dependencies — only Node.js >= 22 (built-in `fetch` / `WebSocket`)
-- Does not patch DSH: it reuses the `dsh web` instance you already have running
+- Does not patch DSH: it reuses the running DSH instance (Desktop or `dsh web`)
 - Every chat peer (private user / group member) maps to its own DSH session, so histories never mix
 - Supports DSH "ask user" (`ask_user`) prompts: the question is forwarded to QQ and the answer is fed back automatically
 - Group chats trigger only when the bot is @-mentioned; private chats (C2C) work directly
 - Optional: install as a "QQ Bot" management plugin inside the DSH settings page (status / logs / model / toggles)
+
+## Compatibility at a glance (1.0.2)
+
+| Runtime | Verified version | Connection |
+|---|---|---|
+| DSH Desktop | **0.1.7-rc.2** | Load `plugin-pkg` in the desktop profile and point `dsh.baseUrl` at the desktop local API (tested here: `http://127.0.0.1:19387`) |
+| DSH Web | **0.1.7-alpha.2** | Load `plugin-pkg` in the Web profile; default `dsh.baseUrl` is `http://127.0.0.1:3080` |
+| Legacy DSH | <= 0.1.1-rc.1 | No plugin: direct `/api/*` access (loopback-unauthenticated era) |
+
+> Release 1.0.2 uses the same core link for DSH Desktop and `dsh web`. The desktop local API port can vary by install/configuration; use the address that is actually listening.
 
 ## Architecture
 
@@ -27,10 +37,10 @@ dsh-qq-bridge (this service, Node.js)
      |  3. GET  /qqbapi/follow/stream (SSE downlink, receives replies)
      |  4. POST /qqbapi/answer        (feeds answers back into DSH questions)
      v
-dsh-qq-bridge plugin /qqbapi/* adapter (inside the DSH process, runs with dsh web)
+dsh-qq-bridge plugin /qqbapi/* adapter (inside the DSH process, runs with DSH Desktop or dsh web)
      |  5. in-process calls to typertGateway (dispatchRpc / openWireStream)
      v
-DeepSeek Harness (dsh web, already running, 127.0.0.1:3080)
+DeepSeek Harness (DSH Desktop or dsh web, already running; Web default 127.0.0.1:3080, Desktop uses its actual local port)
      |  6. reply text via QQ Open API POST /v2/users|groups/.../messages
      v
 QQ user / group member
@@ -41,20 +51,20 @@ QQ user / group member
 > `dsh-client-connection`) — loopback included — so the bridge's raw HTTP calls get
 > `HTTP 401`. The `plugin-pkg` plugin in this repo registers unauthenticated
 > `/qqbapi/*` routes inside the DSH process and translates the legacy protocol into
-> in-process gateway calls (`typertGateway`). **After upgrading DSH, restart `dsh web`
-> once so the plugin code takes effect.** Running `node src/main.js` without the plugin
-> only works on old DSH versions.
+> in-process gateway calls (`typertGateway`). **After upgrading DSH, restart DSH Desktop or
+> `dsh web` once so the plugin code takes effect.** Running `node src/main.js` without the
+> plugin only works on old DSH versions.
 
 ## Quick start
 
 ### 1. Prerequisites
 
-> `127.0.0.1:3080` is just **the default address of `dsh web` on your own machine**.
-> The bridge and `dsh web` must run on the **same computer** because they talk over
-> localhost. That holds for everyone; there is no "only works on one machine"
-> limitation. If your `dsh web` uses another port, change `dsh.baseUrl` in `config.json`.
+> The DSH local API address is configured by `dsh.baseUrl`: `dsh web` defaults to
+> `http://127.0.0.1:3080`, while DSH Desktop uses its actual local port (tested here:
+> `http://127.0.0.1:19387`). The bridge and DSH must run on the **same computer**
+> because they talk over localhost.
 
-- A running `dsh web` (Web GUI, default `http://127.0.0.1:3080`)
+- A running DSH Desktop or `dsh web` (Web default `http://127.0.0.1:3080`; Desktop tested here at `http://127.0.0.1:19387`)
 - Node.js >= 22: check with `node --version`
 - A bot created at [q.qq.com](https://q.qq.com/qqbot/openclaw/index.html), together with its **AppID** and **AppSecret**
   - New bots start in **sandbox mode**: only the developer's own QQ account and whitelisted test members can talk to them. Open access requires review and publishing.
@@ -72,7 +82,7 @@ Key fields in `config.json`:
 |---|---|
 | `qq.appId` / `qq.appSecret` | copied from the bot settings page on q.qq.com |
 | `qq.sandbox` | `true` = sandbox (default for new bots), `false` = production |
-| `dsh.baseUrl` | DSH Web address, default `http://127.0.0.1:3080` |
+| `dsh.baseUrl` | DSH local API address: `dsh web` default `http://127.0.0.1:3080`; DSH Desktop uses its actual port (tested here: `http://127.0.0.1:19387`) |
 | `dsh.workspaceCwd` | working directory for newly created DSH sessions (point it at your usual project folder) |
 | `dsh.agentPreset` | optional; chat mode = DSH agent preset: `standard` / `code` (PTC) / `minimal` / `cordis`; leave empty to follow the Harness default |
 | `dsh.model` | optional; pin `provider` / `model` plus `reasoningEffort` (for example `off` / `high` / `max`, model-dependent) |
@@ -120,8 +130,10 @@ Built-in commands:
 settings page where you can view bridge status and logs, edit
 AppID/Secret/sandbox/model/chat mode/reasoning effort, configure **autostart on boot**
 and **keep-alive after closing the window**, and start / stop / restart the bridge.
+DSH Desktop and Web use the same plugin package; the desktop profile is
+`~/.dsh/profiles/desktop/package.json`.
 
-1. Edit your dsh profile (`~/.dsh/profiles/web/package.json`) and add:
+1. Edit the matching DSH profile `package.json` (Web: `~/.dsh/profiles/web/package.json`; Desktop: `~/.dsh/profiles/desktop/package.json`) and add:
 
    ```jsonc
    {
@@ -130,12 +142,16 @@ and **keep-alive after closing the window**, and start / stop / restart the brid
    }
    ```
 
-2. Restart `dsh web`, then open **Settings -> QQ Bot**.
+2. Restart DSH Desktop or `dsh web`, then open **Settings -> QQ Bot**.
 
 > The plugin has to locate the bridge project directory. By default it derives it from
 > its own location (with a `link:` install that is the project root). If your layout
 > differs, set `DSH_QQB_BRIDGE_DIR=<absolute path to dsh-qq-bridge>` in the environment
-> of the `dsh web` process.
+> of the DSH process (Desktop or `dsh web`).
+>
+> Desktop setup: point `dsh.baseUrl` at the desktop local API (tested here:
+> `http://127.0.0.1:19387`). After restarting the desktop app, `/qqb/state` should show
+> `running=true` and an established DSH event stream.
 
 ## Optional integration B: system autostart / keep-alive (Windows only)
 
@@ -143,8 +159,10 @@ The "System" card on the settings page has two toggles (they can also be set in 
 `system` section of `config.json`):
 
 - **Autostart on boot** (`system.bootAutoStart`): after Windows login, start `dsh web`
-  and the bridge in the background (hidden windows, no UI). Implemented with a generated
-  VBS launcher plus an `HKCU\...\CurrentVersion\Run` registry entry.
+  and the bridge in the background (hidden windows, no UI). The generated launcher
+  currently targets `dsh web`; DSH Desktop users should prefer the desktop app's own
+  startup setting. Implemented with a VBS launcher plus an
+  `HKCU\...\CurrentVersion\Run` registry entry.
 - **Keep-alive after close** (`system.keepAliveAfterClose`): after closing the DSH desktop
   window, keep the backend and the bridge running. Implemented with a `keep-backend.flag`
   file in the bridge project directory, which the desktop wrapper's `main.js` checks
@@ -191,7 +209,7 @@ A: The bridge forwards the question and its options to QQ — reply with the opt
 `/qqbapi/answer` route (in-process `$events/result`).
 
 **Q: The message was sent but there is no reply for a long time**
-A: Open the DSH Web GUI to watch the session (tool calls, questions, ...). Model reasoning
+A: Open DSH Desktop or the Web GUI to watch the session (tool calls, questions, ...). Model reasoning
 can take a while; if it stalls, use `/cancel`.
 
 **Q: I answered a question on the DSH web page, and now my next QQ message disappears**
@@ -226,8 +244,9 @@ dsh-qq-bridge/
   are both gitignored — **never force-add them**.
 - The bridge and the plugin adapter only talk to `dsh web` over loopback (127.0.0.1). The
   `/qqbapi/*` adapter is an **unauthenticated** local interface designed for the local
-  bridge process (matching the loopback `/api` behaviour of older DSH). Do not expose port
-  3080 to the public internet or to untrusted LANs.
+  bridge process (matching the loopback `/api` behaviour of older DSH). Do not expose the
+  DSH local port (`dsh web` default 3080; Desktop tested here at 19387) to the public
+  internet or to untrusted LANs.
 
 ## Version compatibility
 
@@ -235,7 +254,13 @@ dsh-qq-bridge/
 |---|---|---|
 | <= 0.1.0 | <= 0.1.1-rc.1 | direct `/api/*` access (loopback-unauthenticated era) |
 | 1.0.0 | >= 0.1.1-rc.2 (incl. 0.1.2-rc.x, 0.1.5-alpha.x) | via the `/qqbapi/*` in-process adapter in `plugin-pkg` |
-| 1.0.1 (current) | >= 0.1.1-rc.2, incl. **0.1.7-alpha.2** | auto-detects both `openWireStream` signatures; forwards gateway `cancel` frames so an expired question no longer swallows the next QQ message |
+| 1.0.1 | >= 0.1.1-rc.2, incl. **0.1.7-alpha.2** | auto-detects both `openWireStream` signatures; forwards gateway `cancel` frames so an expired question no longer swallows the next QQ message |
+| 1.0.2 (current) | **DSH Desktop 0.1.7-rc.2**; DSH Web >= 0.1.1-rc.2 (incl. **0.1.7-alpha.2**) | Desktop and Web share the same `plugin-pkg` adapter; point `dsh.baseUrl` at the actual local API (desktop tested here at `19387`); clearer desktop wording and docs |
+
+> **Tested on DSH Desktop 0.1.7-rc.2.** Load `plugin-pkg` in the desktop profile, set
+> `dsh.baseUrl` to `http://127.0.0.1:19387`, then restart the desktop app. The management
+> API, QQ gateway, and DSH event stream all work; `/qqb/state` reports `running=true` and
+> an established DSH event stream.
 
 > **DSH 0.1.7-alpha.2 note.** `dsh-api-gateway` changed the wire-stream entry point:
 > `openWireStream(endpoint, payload, signal)` became

@@ -2,14 +2,24 @@
 
 [中文](README.md) | [English](README.en.md)
 
-把 **DeepSeek Harness**(`dsh web`,本机 3080 端口的 Web API)桥接到 **QQ 官方机器人开放平台**(q.qq.com)的轻量桥接服务,让 QQ 机器人直接用 Harness 里的智能体与用户对话。
+把 **DeepSeek Harness**(DSH 桌面端或 `dsh web`,复用其本机 API)桥接到 **QQ 官方机器人开放平台**(q.qq.com)的轻量桥接服务,让 QQ 机器人直接用 Harness 里的智能体与用户对话。
 
 - 零依赖,仅需 Node.js ≥ 22(内置 `fetch` / `WebSocket`)
-- 不修改 DSH 任何代码,复用正在运行的 `dsh web` 实例
+- 不修改 DSH 任何代码,复用正在运行的 DSH 实例(桌面端或 `dsh web`)
 - 每个聊天对象(私聊用户 / 群成员)自动映射一个独立的 DSH 会话,历史互不串扰
 - 支持 DSH 的「提问」(ask_user)交互:问题转发到 QQ,回复自动回填
 - 群聊需 @机器人 才触发;私聊(C2C)直接对话
 - 可选:安装为 DSH 设置页里的「QQ 机器人」管理插件(状态/日志/模型/开关可视化)
+
+## 兼容性速查(1.0.2)
+
+| 运行环境 | 已验证版本 | 连接方式 |
+|---|---|---|
+| DSH 桌面端 | **0.1.7-rc.2** | 在桌面端 profile 加载 `plugin-pkg`,`dsh.baseUrl` 指向桌面端本地 API(本版验证环境:`http://127.0.0.1:19387`) |
+| DSH Web | **0.1.7-alpha.2** | 在 Web profile 加载 `plugin-pkg`,`dsh.baseUrl` 默认 `http://127.0.0.1:3080` |
+| 旧版 DSH | ≤ 0.1.1-rc.1 | 不装插件,直连 `/api/*`(回环免认证时代) |
+
+> 1.0.2 的核心链路同时适用于 DSH 桌面端和 `dsh web`。桌面端本地 API 端口可能因安装/配置而异,以实际监听地址为准。
 
 ## 架构
 
@@ -25,10 +35,10 @@ dsh-qq-bridge (本服务, Node.js)
      │  ③ GET  /qqbapi/follow/stream (SSE 下行流, 收回复)
      │  ④ POST /qqbapi/answer (回填 DSH 提问)
      ▼
-dsh-qq-bridge 插件 /qqbapi/* 适配层 (DSH 进程内, 随 dsh web 运行)
+dsh-qq-bridge 插件 /qqbapi/* 适配层 (DSH 进程内, 随桌面端或 dsh web 运行)
      │  ⑤ 进程内直达 typertGateway (dispatchRpc / openWireStream)
      ▼
-DeepSeek Harness (dsh web, 已在运行, 127.0.0.1:3080)
+DeepSeek Harness (桌面端或 dsh web, 已在运行; Web 默认 127.0.0.1:3080, 桌面端使用实际本地端口)
      │  ⑥ 回复文本经 QQ 开放接口 POST /v2/users|groups/…/messages
      ▼
 QQ 用户/群成员
@@ -38,18 +48,18 @@ QQ 用户/群成员
 > 认证(`dsh-client-connection` 的 `requestRejection`),本机回环也不例外,
 > 桥接进程的裸 HTTP 调用会得到 `HTTP 401`。本仓库的 `plugin-pkg` 插件在
 > DSH 进程内注册免认证的 `/qqbapi/*` 路由,把旧协议翻译成新版进程内网关
-> (`typertGateway`)调用。**升级 DSH 后需要重启 `dsh web` 一次让插件代码生效。**
+> (`typertGateway`)调用。**升级 DSH 后需要重启 DSH 桌面端或 `dsh web` 一次,让插件代码生效。**
 > 直接运行 `node src/main.js`(不装插件)仅在旧版 DSH 上可用。
 
 ## 快速开始
 
 ### 1. 准备
 
-> 「127.0.0.1:3080」是 **dsh web 在你本机上的默认地址** —— 桥接与 dsh web 必须在**同一台电脑**上运行,
-> 通过 localhost 通信。每台电脑都如此, 不存在“只有某台机器能用”的限制。若你的 dsh web 端口不同,
-> 改 `config.json` 的 `dsh.baseUrl` 即可。
+> DSH 本地 API 地址由 `config.json` 的 `dsh.baseUrl` 指定:`dsh web` 默认
+> `http://127.0.0.1:3080`;DSH 桌面端使用其实际本地端口(本版验证环境为
+> `http://127.0.0.1:19387`)。桥接与 DSH 必须在**同一台电脑**上运行,通过 localhost 通信。
 
-- 已运行 `dsh web`(Web GUI,默认 `http://127.0.0.1:3080`)
+- 已运行 DSH 桌面端或 `dsh web`(Web 默认 `http://127.0.0.1:3080`;桌面端本版实测 `http://127.0.0.1:19387`)
 - Node.js ≥ 22:`node --version`
 - 在 [q.qq.com](https://q.qq.com/qqbot/openclaw/index.html) 创建好的机器人,拿到 **AppID** 和 **AppSecret**
   - 新机器人在**沙箱模式**,仅开发者本人 QQ 及测试成员可对话;上架/发布后才对全体用户开放
@@ -67,7 +77,7 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 |---|---|
 | `qq.appId` / `qq.appSecret` | q.qq.com 机器人设置页复制 |
 | `qq.sandbox` | `true` = 沙箱环境(新机器人默认),`false` = 正式环境 |
-| `dsh.baseUrl` | DSH Web 地址,默认 `http://127.0.0.1:3080` |
+| `dsh.baseUrl` | DSH 本地 API 地址:`dsh web` 默认 `http://127.0.0.1:3080`;DSH 桌面端使用实际端口(本版实测 `http://127.0.0.1:19387`) |
 | `dsh.workspaceCwd` | 新建 DSH 会话的工作目录(建议指向你的常用项目目录) |
 | `dsh.agentPreset` | 可选,聊天模式 = DSH 的 Agent 预设:`standard`(标准)/ `code`(PTC)/ `minimal`(极简)/ `cordis`(创造),留空 = 跟随 Harness 默认 |
 | `dsh.model` | 可选,指定模型 `provider` / `model`,以及 `reasoningEffort`(推理等级,如 `off`/`high`/`max`,视模型而定) |
@@ -110,9 +120,9 @@ node src/main.js        # 或 npm start
 
 ## 可选集成 A:安装为 DSH 设置页插件(`plugin-pkg`)
 
-`plugin-pkg/` 是 **DeepSeek Harness 静态插件**:设置页出现「QQ 机器人」卡片,可查看桥接状态/日志、改 AppID/Secret/沙箱/模型/聊天模式/推理等级、配置**开机自启**与**关窗保活**,启停与自动重启桥接。
+`plugin-pkg/` 是 **DeepSeek Harness 静态插件**:设置页出现「QQ 机器人」卡片,可查看桥接状态/日志、改 AppID/Secret/沙箱/模型/聊天模式/推理等级、配置**开机自启**与**关窗保活**,启停与自动重启桥接。桌面端与 Web 使用同一插件包;桌面端 profile 为 `~/.dsh/profiles/desktop/package.json`。
 
-1. 修改你的 dsh profile(`~/.dsh/profiles/web/package.json`),添加:
+1. 修改对应 DSH profile 的 `package.json`(Web:`~/.dsh/profiles/web/package.json`;桌面端:`~/.dsh/profiles/desktop/package.json`),添加:
 
    ```jsonc
    {
@@ -121,16 +131,18 @@ node src/main.js        # 或 npm start
    }
    ```
 
-2. 重启 `dsh web`,进入「设置 → QQ 机器人」。
+2. 重启 `dsh web` 或 DSH 桌面端,进入「设置 → QQ 机器人」。
 
 > 插件需要能找到桥接项目目录:`plugin-pkg` 默认从自身位置推导(link 安装时即项目根)。
-> 若你的目录结构不同,给运行 dsh web 的进程设置环境变量 `DSH_QQB_BRIDGE_DIR=<桥接项目绝对路径>` 覆盖。
+> 若你的目录结构不同,给运行 DSH 的进程(桌面端或 `dsh web`)设置环境变量 `DSH_QQB_BRIDGE_DIR=<桥接项目绝对路径>` 覆盖。
+>
+> 桌面端配置:把 `config.json` 的 `dsh.baseUrl` 指向桌面端本地 API(本版验证环境 `http://127.0.0.1:19387`),重启桌面端后 `/qqb/state` 应显示 `running=true` 与「已连接 DSH 事件流」。
 
 ## 可选集成 B:系统级开机自启 / 关窗保活(仅 Windows)
 
 设置页「系统」卡里有两个开关(也可以在 `config.json` 的 `system` 段配置):
 
-- **开机自启**(`system.bootAutoStart`):登录 Windows 后后台自动启动 dsh web 与桥接(隐藏窗口,不弹界面)。
+- **开机自启**(`system.bootAutoStart`):登录 Windows 后后台自动启动 `dsh web` 与桥接(隐藏窗口,不弹界面)。当前生成的是 `dsh web` 启动器;DSH 桌面端用户请优先使用桌面端自身的开机启动设置。
   实现:生成 VBS 启动器 + 写 `HKCU\...\CurrentVersion\Run` 注册表项。
 - **关窗保活**(`system.keepAliveAfterClose`):关闭 DSH 桌面版窗口后,后端与桥接仍在后台运行。
   实现:桥接项目目录下创建 `keep-backend.flag`,配合桌面封装的 main.js 检测该文件决定是否杀掉子进程。
@@ -161,7 +173,7 @@ A: 依次检查:① 沙箱白名单是否包含你的测试号;② 对应消息�
 A: 桥会把问题和选项转发到 QQ,直接回复选项编号(如 `2`)或自由文本即可;回答会通过插件适配层的 `/qqbapi/answer`(进程内 `$events/result`)回填给 DSH 智能体。
 
 **Q: 消息发出去了但很久没回复**
-A: 打开 DSH Web GUI 能看到对应会话的运行过程(工具调用、提问等)。模型推理可能较长;若长时间无输出,可用 `/cancel` 中止。
+A: 打开 DSH 桌面端或 Web GUI 能看到对应会话的运行过程(工具调用、提问等)。模型推理可能较长;若长时间无输出,可用 `/cancel` 中止。
 
 **Q: 我在 DSH 网页端把提问答了,之后 QQ 再发消息就不见了**
 A: v1.0.1 已修复。提问被别处消费时(网页端作答 / 回合结束 / 中止),网关会下发一帧 `{ type: "cancel", eventId }`;旧版本桥接忽略了它,于是仍以为提问挂着,把用户的下一条 QQ 消息当成「回答」提交,而网关对过期 eventId 只静默丢弃 —— 消息就凭空消失。现在桥接会在收到 `cancel` 时清掉等待项,并在回填失败时明确提示「原提问已失效」,不再吞掉用户消息。
@@ -187,7 +199,7 @@ dsh-qq-bridge/
 ## 安全须知
 
 - `config.json`(含 AppSecret)与 `sessions.json`(含聊天对象标识)都在 `.gitignore` 中,**不要 force-add**。
-- 桥接与插件适配层只通过本机回环(127.0.0.1)与 dsh web 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 3080 端口暴露到公网或不可信的局域网。
+- 桥接与插件适配层只通过本机回环(127.0.0.1)与 DSH 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 DSH 本地端口(`dsh web` 默认 3080;桌面端本版实测 19387)暴露到公网或不可信的局域网。
 
 ## 兼容性版本对照
 
@@ -195,7 +207,10 @@ dsh-qq-bridge/
 |---|---|---|
 | ≤ 0.1.0 | ≤ 0.1.1-rc.1 | 直连 `/api/*`(回环免认证时代) |
 | 1.0.0 | ≥ 0.1.1-rc.2(含 0.1.2-rc.x / 0.1.5-alpha.x) | 经 `plugin-pkg` 的 `/qqbapi/*` 进程内适配层 |
-| 1.0.1 (当前) | ≥ 0.1.1-rc.2,含 **0.1.7-alpha.2** | 自动嗅探 `openWireStream` 新旧两种签名;转发网关 `cancel` 帧,提问过期不再吞掉下一条 QQ 消息 |
+| 1.0.1 | ≥ 0.1.1-rc.2,含 **0.1.7-alpha.2** | 自动嗅探 `openWireStream` 新旧两种签名;转发网关 `cancel` 帧,提问过期不再吞掉下一条 QQ 消息 |
+| 1.0.2 (当前) | **DSH 桌面端 0.1.7-rc.2**;DSH Web ≥ 0.1.1-rc.2(含 **0.1.7-alpha.2**) | 桌面端与 Web 共用同一套 `plugin-pkg` 适配层;通过 `dsh.baseUrl` 指向实际本地 API(桌面端本版实测 `19387`),修复桌面端迁移时的提示文字与文档 |
+
+> **桌面端 0.1.7-rc.2 实测**:在桌面端 profile 加载 `plugin-pkg`,把 `dsh.baseUrl` 指向 `http://127.0.0.1:19387`,重启桌面端后管理接口、QQ 网关和 DSH 事件流均正常。`/qqb/state` 可看到 `running=true` 与「已连接 DSH 事件流」。
 
 > **关于 DSH 0.1.7-alpha.2**:`dsh-api-gateway` 改了载体开流签名,
 > `openWireStream(endpoint, payload, signal)` 变为
