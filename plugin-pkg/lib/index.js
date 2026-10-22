@@ -18,7 +18,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -77,20 +77,43 @@ const EMPTY_UPLINK = Object.freeze({
 });
 
 /**
+ * 取网关调用所需的 Peer。
+ *
+ * DSH 0.2.x 移除了网关内置的 operator Peer (operatorPeer()/inProcessOperator
+ * 已不存在), 所有 dispatchRpc / openWireStream 都必须显式带 Peer, 否则
+ * assertPeerLive(peer) 会抛 "Cannot read properties of undefined (reading 'signal')"。
+ * host 侧可用的等价身份是 connection.browserPeer
+ * (principal=owner, interactions=answer), 与网页端共用同一 Peer。
+ * 旧版网关没有它, 再回退到 gateway.operatorPeer()。
+ */
+function operatorPeerOf(gateway, ctx) {
+  try {
+    const conn = ctx && typeof ctx.get === 'function' ? ctx.get('connection') : undefined;
+    const peer = conn && (conn.browserPeer || conn.operatorPeer);
+    if (peer) return peer;
+  } catch { /* ignore */ }
+  try {
+    if (gateway && typeof gateway.operatorPeer === 'function') return gateway.operatorPeer();
+  } catch { /* ignore */ }
+  return undefined;
+}
+
+/**
  * 跨版本打开一条 wire 流。
  * @param gateway typertGateway 服务实例
  * @param endpoint 形如 '$events' / 'session/follow'
  * @param payload 形如 { args: {...} }
  * @param signal 真实 AbortSignal
+ * @param ctx 插件 host 上下文 (用于取 Peer)
  * @returns 可 for await 的异步迭代器
  */
-function openWireStream(gateway, endpoint, payload, signal) {
+function openWireStream(gateway, endpoint, payload, signal, ctx) {
   if (!gateway || typeof gateway.openWireStream !== 'function') {
     throw new Error('typertGateway.openWireStream 不可用 (DSH 版本可能过旧或网关未挂载)');
   }
   // 新版: (endpoint, payload, uplink, peer, signal, control)
   if (gateway.openWireStream.length >= 4) {
-    return gateway.openWireStream(endpoint, payload, EMPTY_UPLINK, undefined, signal, new AbortController());
+    return gateway.openWireStream(endpoint, payload, EMPTY_UPLINK, operatorPeerOf(gateway, ctx), signal, new AbortController());
   }
   // 旧版: (endpoint, payload, signal)
   return gateway.openWireStream(endpoint, payload, signal);
@@ -131,7 +154,7 @@ function applyQqbApi(ctx) {
       const abort = new AbortController();
       eventsAbort = abort;
       try {
-        const iterator = await openWireStream(gateway, '$events', { args: {} }, abort.signal);
+        const iterator = await openWireStream(gateway, '$events', { args: {} }, abort.signal, ctx);
         for await (const frame of iterator) {
           if (frame && frame.type === 'ready') { eventsClientId = frame.clientId; continue; }
           // 提问被别处消费时 (网页端作答 / 回合结束 / 中止), 网关会下发 { type: 'cancel', eventId }。
@@ -146,7 +169,7 @@ function applyQqbApi(ctx) {
           }
           // 其余帧 (emit/waterfall 非问询) 一律回 kind:"next" 放行给浏览器 UI
           if (frame && frame.type === 'waterfall') {
-            void gateway.dispatchRpc('$events/result', { args: { clientId: eventsClientId, eventId: frame.eventId, outcome: { kind: 'next' } } }, undefined).catch(() => {});
+            void gateway.dispatchRpc('$events/result', { args: { clientId: eventsClientId, eventId: frame.eventId, outcome: { kind: 'next' } } }, undefined, operatorPeerOf(gateway, ctx)).catch(() => {});
           }
         }
       } catch (err) {
@@ -170,7 +193,7 @@ function applyQqbApi(ctx) {
     follows.set(sessionId, f);
     void (async () => {
       try {
-        const iterator = await openWireStream(gateway, 'session/follow', { args: { request: { address: { kind: 'session', sessionId } } } }, controller.signal);
+        const iterator = await openWireStream(gateway, 'session/follow', { args: { request: { address: { kind: 'session', sessionId } } } }, controller.signal, ctx);
         for await (const frame of iterator) {
           broadcastSse('session-event', { sessionId, frame });
         }
@@ -204,7 +227,7 @@ function applyQqbApi(ctx) {
       } else {
         args = { request: payload };
       }
-      const value = await gateway.dispatchRpc(endpoint, { args }, undefined);
+      const value = await gateway.dispatchRpc(endpoint, { args }, undefined, operatorPeerOf(gateway, ctx));
       sendJson(res, 200, { type: 'server-response', rpcId, result: value });
     } catch (err) {
       sendJson(res, 200, {
@@ -230,7 +253,7 @@ function applyQqbApi(ctx) {
       // 不检查就会把「提问已失效」误报成成功, 让调用方白白吞掉用户消息。
       const outcome = await gateway.dispatchRpc('$events/result', {
         args: { clientId, eventId, outcome: { kind: 'result', value: { answers } } },
-      }, undefined);
+      }, undefined, operatorPeerOf(gateway, ctx));
       if (outcome && outcome.ok === false) {
         const why = (outcome.error && (outcome.error.message || outcome.error.code)) || '未知错误';
         return sendJson(res, 200, { ok: false, error: '回答未能回填 (该提问可能已结束或已在网页端作答): ' + why });
@@ -328,20 +351,22 @@ function apply(ctx) {
 
   // ---------- 配置 (fs 服务) ----------
 
-  async function configTarget() {
-    return ctx.fs.resolve(BRIDGE_DIR + '\\config.json');
+  // 插件私有目录位于用户工作区之外 (如 C:\Users\liu\Documents\...\dsh-qq-bridge),
+  // host 的 ctx.fs 受 workspace-write 沙箱限制会拒绝读写, 设置页保存配置报
+  // "file access denied under workspace-write mode"。改用 node:fs 直读直写。
+  function configTarget() {
+    return join(BRIDGE_DIR, 'config.json');
   }
   async function readConfig() {
     try {
-      const raw = await ctx.fs.readText(await configTarget());
-      return JSON.parse(raw);
+      return JSON.parse(readFileSync(configTarget(), 'utf8'));
     } catch (err) {
       logErr('读取 config.json 失败: ' + (err && err.message));
       return null;
     }
   }
   async function writeConfig(cfg) {
-    await ctx.fs.writeText(await configTarget(), JSON.stringify(cfg, null, 2));
+    writeFileSync(configTarget(), JSON.stringify(cfg, null, 2), 'utf8');
   }
 
   // ---------- 日志收集 ----------
@@ -363,6 +388,15 @@ function apply(ctx) {
   //   · 防并发: 已在运行则直接返回; 有残留句柄先杀; 自动重启定时器单一管理,
   //     避免多个 exit 回调/保存操作叠加出多个桥接进程 (曾导致 QQ 平台频控)。
 
+  /** host 当前监听的 origin (以 webServer 实际端口为准, 缺席时退回 config)。 */
+  function currentDshBaseUrl() {
+    try {
+      const port = ctx.webServer && ctx.webServer.port;
+      if (port) return 'http://127.0.0.1:' + port;
+    } catch { /* ignore */ }
+    return state.config && state.config.dsh ? state.config.dsh.baseUrl : undefined;
+  }
+
   async function spawnBridge() {
     if (disposed) return;
     if (state.running && state.proc) return; // 已在运行, 防并发
@@ -372,10 +406,15 @@ function apply(ctx) {
     }
     const nodePath = process.execPath || 'node';
     state.nodePath = nodePath;
+    // DSH 桌面端 Web 端口每次启动可能变化 (本机为随机端口, 例如 60861), config.json
+    // 里写死的 dsh.baseUrl 很容易过期 —— 桥接就会 fetch failed, QQ 只回
+    // 「DSH 似乎没有在运行」。把 host 当前真实 origin 经环境变量传给子进程。
+    const liveBaseUrl = currentDshBaseUrl();
     const child = spawn(nodePath, ['src/main.js'], {
       cwd: BRIDGE_DIR,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...(liveBaseUrl ? { DSH_QQB_DSH_URL: liveBaseUrl } : {}) },
     });
     child.stdout.on('data', (d) => pushLog('stdout', d.toString()));
     child.stderr.on('data', (d) => pushLog('stderr', d.toString()));
@@ -392,10 +431,16 @@ function apply(ctx) {
       if (state.proc === child) state.proc = null;
     });
     child.on('exit', (code, signal) => {
+      // 只处理「当前」子进程的退出: stopBridge()/保存配置之后旧子进程的 exit 会迟到,
+      // 若照样把 running 置 false 并调度自动重启, 就会把刚拉起的新进程杀掉 → 无限重启。
+      if (state.proc !== child) {
+        log('忽略旧桥接进程退出 (pid=' + child.pid + ' code=' + code + ' signal=' + signal + ')');
+        return;
+      }
       state.running = false;
       state.exitInfo = { code, signal, at: Date.now() };
       log('桥接进程退出 code=' + code + ' signal=' + signal);
-      if (state.proc === child) state.proc = null;
+      state.proc = null;
       const auto = !disposed && !state.userStopped && state.config && state.config.bridge && state.config.bridge.autoStart;
       if (auto) {
         state.restartCount++;
@@ -464,6 +509,7 @@ function apply(ctx) {
         exitInfo: state.exitInfo,
         restartCount: state.restartCount,
         nodePath: state.nodePath,
+        dshBaseUrl: currentDshBaseUrl() || null,
       },
       logTail: state.logLines.slice(-40),
     };

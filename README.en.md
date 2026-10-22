@@ -13,15 +13,18 @@ through the agents running inside Harness.
 - Group chats trigger only when the bot is @-mentioned; private chats (C2C) work directly
 - Optional: install as a "QQ Bot" management plugin inside the DSH settings page (status / logs / model / toggles)
 
-## Compatibility at a glance (1.0.2)
+## Compatibility at a glance (1.0.3)
 
 | Runtime | Verified version | Connection |
 |---|---|---|
-| DSH Desktop | **0.1.7-rc.2** | Load `plugin-pkg` in the desktop profile and point `dsh.baseUrl` at the desktop local API (tested here: `http://127.0.0.1:19387`) |
-| DSH Web | **0.1.7-alpha.2** | Load `plugin-pkg` in the Web profile; default `dsh.baseUrl` is `http://127.0.0.1:3080` |
+| DSH Desktop | **0.2.1-rc.2**, 0.1.7-rc.2 | Load `plugin-pkg` in the desktop profile; the desktop Web port is random per launch (e.g. `60861`), and the plugin forwards the live origin to the bridge via `DSH_QQB_DSH_URL` — no need to hand-edit `config.json` |
+| DSH Web | **0.1.7-alpha.2**, >= 0.2.x | Load `plugin-pkg` in the Web profile; default `dsh.baseUrl` is `http://127.0.0.1:3080` |
 | Legacy DSH | <= 0.1.1-rc.1 | No plugin: direct `/api/*` access (loopback-unauthenticated era) |
 
-> Release 1.0.2 uses the same core link for DSH Desktop and `dsh web`. The desktop local API port can vary by install/configuration; use the address that is actually listening.
+> Since 1.0.3 the desktop no longer depends on a hard-coded port; `dsh.baseUrl` in
+> `config.json` is only a fallback for running `node src/main.js` by hand. Also, the 0.2.x
+> gateway requires a real Peer, so the adapter now uses `connection.browserPeer`; otherwise
+> every RPC fails with `Cannot read properties of undefined (reading 'signal')`.
 
 ## Architecture
 
@@ -149,9 +152,10 @@ DSH Desktop and Web use the same plugin package; the desktop profile is
 > differs, set `DSH_QQB_BRIDGE_DIR=<absolute path to dsh-qq-bridge>` in the environment
 > of the DSH process (Desktop or `dsh web`).
 >
-> Desktop setup: point `dsh.baseUrl` at the desktop local API (tested here:
-> `http://127.0.0.1:19387`). After restarting the desktop app, `/qqb/state` should show
-> `running=true` and an established DSH event stream.
+> Desktop setup: since 1.0.3 no port is needed — the plugin injects
+> `DSH_QQB_DSH_URL=<the desktop's live origin>` when it spawns the bridge. After restarting
+> the desktop app, `/qqb/state` should show `running=true`, `status.dshBaseUrl` set to the
+> current port, and an established DSH event stream.
 
 ## Optional integration B: system autostart / keep-alive (Windows only)
 
@@ -245,7 +249,8 @@ dsh-qq-bridge/
 - The bridge and the plugin adapter only talk to `dsh web` over loopback (127.0.0.1). The
   `/qqbapi/*` adapter is an **unauthenticated** local interface designed for the local
   bridge process (matching the loopback `/api` behaviour of older DSH). Do not expose the
-  DSH local port (`dsh web` default 3080; Desktop tested here at 19387) to the public
+  DSH local port (`dsh web` default 3080; on Desktop it is a random port — see
+  `status.dshBaseUrl` in `/qqb/state`) to the public
   internet or to untrusted LANs.
 
 ## Version compatibility
@@ -255,12 +260,19 @@ dsh-qq-bridge/
 | <= 0.1.0 | <= 0.1.1-rc.1 | direct `/api/*` access (loopback-unauthenticated era) |
 | 1.0.0 | >= 0.1.1-rc.2 (incl. 0.1.2-rc.x, 0.1.5-alpha.x) | via the `/qqbapi/*` in-process adapter in `plugin-pkg` |
 | 1.0.1 | >= 0.1.1-rc.2, incl. **0.1.7-alpha.2** | auto-detects both `openWireStream` signatures; forwards gateway `cancel` frames so an expired question no longer swallows the next QQ message |
-| 1.0.2 (current) | **DSH Desktop 0.1.7-rc.2**; DSH Web >= 0.1.1-rc.2 (incl. **0.1.7-alpha.2**) | Desktop and Web share the same `plugin-pkg` adapter; point `dsh.baseUrl` at the actual local API (desktop tested here at `19387`); clearer desktop wording and docs |
+| 1.0.2 | **DSH Desktop 0.1.7-rc.2**; DSH Web >= 0.1.1-rc.2 (incl. **0.1.7-alpha.2**) | Desktop and Web share the same `plugin-pkg` adapter; point `dsh.baseUrl` at the actual local API (desktop tested here at `19387`); clearer desktop wording and docs |
+| 1.0.3 (current) | **DSH Desktop 0.2.1-rc.2**; DSH Web >= 0.1.1-rc.2 | Adapts to the 0.2.x gateway's mandatory real Peer (`connection.browserPeer`); follows the desktop's random port via `DSH_QQB_DSH_URL`; `config.json` now uses `node:fs` so the settings page is no longer blocked by the workspace-write sandbox; fixes a restart storm after saving the config |
 
-> **Tested on DSH Desktop 0.1.7-rc.2.** Load `plugin-pkg` in the desktop profile, set
-> `dsh.baseUrl` to `http://127.0.0.1:19387`, then restart the desktop app. The management
-> API, QQ gateway, and DSH event stream all work; `/qqb/state` reports `running=true` and
-> an established DSH event stream.
+> **Tested on DSH Desktop 0.2.1-rc.2.** Load `plugin-pkg` in the desktop profile — you do
+> **not** need to hard-code a port any more: the plugin injects the live origin
+> (`DSH_QQB_DSH_URL`) when spawning the bridge. `/qqb/state` should report `running=true`
+> with `status.dshBaseUrl` set to the current port, and the log should show the DSH event
+> stream connected plus `READY` on the QQ gateway.
+
+> **Troubleshooting.** Endless `events stream failed: fetch failed` in the bridge log while
+> QQ only receives "DSH seems not to be running" -> the bridge cannot reach DSH (stale port or
+> DSH not running). `Cannot read properties of undefined (reading 'signal')` -> the adapter
+> does not match the current DSH gateway; upgrade this plugin.
 
 > **DSH 0.1.7-alpha.2 note.** `dsh-api-gateway` changed the wire-stream entry point:
 > `openWireStream(endpoint, payload, signal)` became

@@ -15,6 +15,12 @@ function loadConfig() {
     throw new Error("config.json 缺少 qq.appId / qq.appSecret, 请先在 q.qq.com 机器人设置页复制并填入");
   }
   if (!cfg.dsh?.baseUrl) throw new Error("config.json 缺少 dsh.baseUrl");
+  // 插件 host 会把 DSH 实际监听地址经环境变量注入 (桌面端端口随每次启动变化),
+  // 优先级高于 config.json 中写死的 dsh.baseUrl。
+  const envBaseUrl = process.env.DSH_QQB_DSH_URL;
+  if (envBaseUrl && /^https?:\/\//.test(envBaseUrl)) {
+    cfg.dsh.baseUrl = envBaseUrl;
+  }
   return cfg;
 }
 

@@ -11,15 +11,18 @@
 - 群聊需 @机器人 才触发;私聊(C2C)直接对话
 - 可选:安装为 DSH 设置页里的「QQ 机器人」管理插件(状态/日志/模型/开关可视化)
 
-## 兼容性速查(1.0.2)
+## 兼容性速查(1.0.3)
 
 | 运行环境 | 已验证版本 | 连接方式 |
 |---|---|---|
-| DSH 桌面端 | **0.1.7-rc.2** | 在桌面端 profile 加载 `plugin-pkg`,`dsh.baseUrl` 指向桌面端本地 API(本版验证环境:`http://127.0.0.1:19387`) |
-| DSH Web | **0.1.7-alpha.2** | 在 Web profile 加载 `plugin-pkg`,`dsh.baseUrl` 默认 `http://127.0.0.1:3080` |
+| DSH 桌面端 | **0.2.1-rc.2**、0.1.7-rc.2 | 在桌面端 profile 加载 `plugin-pkg`;桌面端 Web 端口每次启动随机(例如 `60861`),插件会自动把当前 origin 经 `DSH_QQB_DSH_URL` 传给桥接,无需手改 `config.json` |
+| DSH Web | **0.1.7-alpha.2**、≥ 0.2.x | 在 Web profile 加载 `plugin-pkg`,`dsh.baseUrl` 默认 `http://127.0.0.1:3080` |
 | 旧版 DSH | ≤ 0.1.1-rc.1 | 不装插件,直连 `/api/*`(回环免认证时代) |
 
-> 1.0.2 的核心链路同时适用于 DSH 桌面端和 `dsh web`。桌面端本地 API 端口可能因安装/配置而异,以实际监听地址为准。
+> 1.0.3 起桌面端不再依赖写死端口;`config.json` 的 `dsh.baseUrl` 只在手动
+> `node src/main.js` 时作为回落值。另外 0.2.x 网关要求真实 Peer,适配层改用
+> `connection.browserPeer`,否则每个 RPC 都会报
+> `Cannot read properties of undefined (reading 'signal')`。
 
 ## 架构
 
@@ -136,7 +139,8 @@ node src/main.js        # 或 npm start
 > 插件需要能找到桥接项目目录:`plugin-pkg` 默认从自身位置推导(link 安装时即项目根)。
 > 若你的目录结构不同,给运行 DSH 的进程(桌面端或 `dsh web`)设置环境变量 `DSH_QQB_BRIDGE_DIR=<桥接项目绝对路径>` 覆盖。
 >
-> 桌面端配置:把 `config.json` 的 `dsh.baseUrl` 指向桌面端本地 API(本版验证环境 `http://127.0.0.1:19387`),重启桌面端后 `/qqb/state` 应显示 `running=true` 与「已连接 DSH 事件流」。
+> 桌面端配置:1.0.3 起无需指定端口 —— 插件拉起桥接时会注入 `DSH_QQB_DSH_URL=<桌面端当前实际 origin>`。
+> 重启桌面端后 `/qqb/state` 应显示 `running=true`、`status.dshBaseUrl` 为当前端口,并出现「已连接 DSH 事件流」。
 
 ## 可选集成 B:系统级开机自启 / 关窗保活(仅 Windows)
 
@@ -199,7 +203,7 @@ dsh-qq-bridge/
 ## 安全须知
 
 - `config.json`(含 AppSecret)与 `sessions.json`(含聊天对象标识)都在 `.gitignore` 中,**不要 force-add**。
-- 桥接与插件适配层只通过本机回环(127.0.0.1)与 DSH 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 DSH 本地端口(`dsh web` 默认 3080;桌面端本版实测 19387)暴露到公网或不可信的局域网。
+- 桥接与插件适配层只通过本机回环(127.0.0.1)与 DSH 通信。`/qqbapi/*` 适配层是为本机桥接进程设计的**免认证**本地接口(与旧版 DSH 的回环 `/api` 行为一致),请勿把 DSH 本地端口(`dsh web` 默认 3080;桌面端为随机端口,以 `/qqb/state` 的 `status.dshBaseUrl` 为准)暴露到公网或不可信的局域网。
 
 ## 兼容性版本对照
 
@@ -208,9 +212,13 @@ dsh-qq-bridge/
 | ≤ 0.1.0 | ≤ 0.1.1-rc.1 | 直连 `/api/*`(回环免认证时代) |
 | 1.0.0 | ≥ 0.1.1-rc.2(含 0.1.2-rc.x / 0.1.5-alpha.x) | 经 `plugin-pkg` 的 `/qqbapi/*` 进程内适配层 |
 | 1.0.1 | ≥ 0.1.1-rc.2,含 **0.1.7-alpha.2** | 自动嗅探 `openWireStream` 新旧两种签名;转发网关 `cancel` 帧,提问过期不再吞掉下一条 QQ 消息 |
-| 1.0.2 (当前) | **DSH 桌面端 0.1.7-rc.2**;DSH Web ≥ 0.1.1-rc.2(含 **0.1.7-alpha.2**) | 桌面端与 Web 共用同一套 `plugin-pkg` 适配层;通过 `dsh.baseUrl` 指向实际本地 API(桌面端本版实测 `19387`),修复桌面端迁移时的提示文字与文档 |
+| 1.0.2 | **DSH 桌面端 0.1.7-rc.2**;DSH Web ≥ 0.1.1-rc.2(含 **0.1.7-alpha.2**) | 桌面端与 Web 共用同一套 `plugin-pkg` 适配层;通过 `dsh.baseUrl` 指向实际本地 API(桌面端本版实测 `19387`),修复桌面端迁移时的提示文字与文档 |
+| 1.0.3 (当前) | **DSH 桌面端 0.2.1-rc.2**;DSH Web ≥ 0.1.1-rc.2 | 适配 0.2.x 网关的真实 Peer 要求(`connection.browserPeer`);桌面端随机端口自动跟随(`DSH_QQB_DSH_URL`);`config.json` 改用 `node:fs` 读写,设置页保存不再被 workspace-write 沙箱拒绝;修复保存配置后的无限重启 |
 
-> **桌面端 0.1.7-rc.2 实测**:在桌面端 profile 加载 `plugin-pkg`,把 `dsh.baseUrl` 指向 `http://127.0.0.1:19387`,重启桌面端后管理接口、QQ 网关和 DSH 事件流均正常。`/qqb/state` 可看到 `running=true` 与「已连接 DSH 事件流」。
+> **桌面端 0.2.1-rc.2 实测**:在桌面端 profile 加载 `plugin-pkg`,**不需要**在 `config.json` 里写死端口 —— 插件拉起桥接时会注入当前 origin(`DSH_QQB_DSH_URL`)。`/qqb/state` 应显示 `running=true`、`status.dshBaseUrl` 为当前端口,日志出现「已连接 DSH 事件流」与「网关就绪 READY」。
+
+> **排障速查**:日志反复出现 `events 流连接失败: fetch failed`,且 QQ 只回「DSH 似乎没有在运行」→ 桥接连不上 DSH(端口过期或 DSH 未运行);
+> 日志出现 `Cannot read properties of undefined (reading 'signal')` → 插件适配层与当前 DSH 网关版本不匹配,请升级本插件。
 
 > **关于 DSH 0.1.7-alpha.2**:`dsh-api-gateway` 改了载体开流签名,
 > `openWireStream(endpoint, payload, signal)` 变为
